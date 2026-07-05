@@ -99,6 +99,12 @@ def cmd_make_targets(args) -> int:
                 "sha256": sha256_file(dst),
             }
             print(f"{group_dir.name:8s} {spk_dir.name:6s} <- {ref.name}")
+    # Remove wavs from previous rosters — the eval harness scans this directory,
+    # so a stale target would silently re-enter the study.
+    for wav in sorted(out_dir.glob("*.wav")):
+        if wav.stem not in picked:
+            wav.unlink()
+            print(f"[clean] removed stale target {wav.name} (not in current roster)")
     with open(out_dir / "targets_meta.json", "w", encoding="utf-8") as f:
         json.dump(picked, f, indent=2)
     print(f"\n{len(picked)} pinned target references in {out_dir} "
