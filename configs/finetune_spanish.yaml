@@ -1,0 +1,45 @@
+# Accent fine-tuning config: Spanish (EBVS + MBMPS), "Option A" baseline.
+#
+# Thin overlay on configs/xvc.yaml (merged via `base_config` in utils/file.load_config).
+# See configs/finetune_arabic.yaml for field-by-field rationale and the launch command;
+# only the dataset paths differ between accents. Speakers: EBVS (M) + MBMPS (F).
+
+base_config: configs/xvc.yaml
+
+#===========================|  Dataset (this accent only) |=====================#
+datasets:
+  train:
+    - data/finetuning_audio/manifests/spanish/train.jsonl
+  val:
+    - data/finetuning_audio/manifests/spanish/val.jsonl
+
+#===========================|  Self-reconstruction training |===================#
+dataloader:
+  reconstruction_ratio: 1.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  static:
+    batch_size: 8
+
+#===========================|  Conservative fine-tune schedule |================#
+current_step: 0
+current_epoch: 0
+
+log_interval: 10
+val_interval: 100
+save_interval: 250
+keep_interval: 250
+total_step: 3000
+
+generator_warmup_steps: 100000
+ema_update: false
+
+run_validation: true
+freeze_eval_backbone: true
+
+#===========================|  Freeze all but converter + prenet |==============#
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    optim_conf:
+      lr: 0.00001

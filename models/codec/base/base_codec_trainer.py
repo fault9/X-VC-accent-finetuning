@@ -144,6 +144,25 @@ class BaseCodecTrainer(BaseTranier):
             else:
                 scaled_loss.backward()
 
+    def _set_train_mode(self, models):
+        """Put models in train() mode, then re-pin the frozen backbone to eval().
+
+        The semantic encoder is always kept in eval(). When `freeze_eval_backbone`
+        is set (fine-tuning), every generator submodule whose parameters are all
+        frozen is also forced to eval(), so modules with running statistics -- e.g.
+        the ERes2Net BatchNorm inside `speaker_encoder` -- do not drift while only
+        `acoustic_converter` and `prenet` are trained. `.module` unwraps the
+        DeepSpeed/DDP wrapper when present.
+        """
+        [model.train() for _, model in models.items()]
+        models["generator"].semantic_encoder.eval()
+        if self.config.get("freeze_eval_backbone", False):
+            gen = models["generator"]
+            gen_module = gen.module if hasattr(gen, "module") else gen
+            for sub in gen_module.children():
+                if all(not p.requires_grad for p in sub.parameters()):
+                    sub.eval()
+
     def train(
         self,
         models: Dict[str, nn.Module],
@@ -157,8 +176,7 @@ class BaseCodecTrainer(BaseTranier):
         ema_model: nn.Module = None,
     ):
         """Train one epoch"""
-        [model.train() for _, model in models.items()]
-        models["generator"].semantic_encoder.eval()
+        self._set_train_mode(models)
         if ema_model is not None and self.rank == 0:
             ema_model.eval()
 
@@ -195,10 +213,20 @@ class BaseCodecTrainer(BaseTranier):
                 # log per step
                 lr_dict = self.log_training_step(epoch, loss_dict, optimizers)
 
-                # if self.config["val_interval"] > 0 and self.step % self.config["val_interval"] == 0 and self.step != 0:
-                #     validation_loss_dict = self.validate(models, val_data_loader)
-                #     [model.train() for _, model in models.items()]
-                #     self.log_validation_step(validation_loss_dict)
+                # In-loop validation. Disabled upstream (this block was commented
+                # out); re-enabled here but guarded by `run_validation` so the
+                # pretraining path is unaffected unless a config opts in.
+                if (
+                    self.config.get("run_validation", False)
+                    and self.config["val_interval"] > 0
+                    and self.step % self.config["val_interval"] == 0
+                    and self.step != 0
+                ):
+                    validation_loss_dict = self.validate(models, val_data_loader)
+                    # validate() switches everything to eval(); restore train mode
+                    # (and re-pin the frozen backbone) before continuing training.
+                    self._set_train_mode(models)
+                    self.log_validation_step(validation_loss_dict)
 
                 # NOTE(xinsheng): In deepspeed, all rank should call save_checkpoint
                 self.check_save_model(epoch, lr_dict, models, ema_model=ema_model)

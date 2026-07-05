@@ -67,42 +67,128 @@ def resume_ema_checkpoint(ema_model: nn.Module, model_dir: Path, resume_step: in
     return ema_model
 
 
+def _report_and_gate_load(
+    model_name: str,
+    missing_keys: list,
+    unexpected_keys: list,
+    require_modules=None,
+    strict_unexpected: bool = True,
+):
+    """Log a LOUD summary of a strict=False load and fail on a bad load.
+
+    A `strict=False` load silently tolerates a state_dict that matches almost
+    nothing -- the classic "trains successfully from garbage" failure. This gate
+    makes the outcome visible and turns two specific cases into hard errors:
+
+      * `unexpected_keys` (weights in the checkpoint with no home in the model) ->
+        an architecture / config mismatch; fail unless `strict_unexpected=False`.
+      * `missing_keys` that fall inside a `require_modules` prefix (the modules we
+        actually fine-tune -- prenet / acoustic_converter) -> those weights MUST
+        come from the warm-start checkpoint, so a miss there means training from
+        random init exactly where it matters. Fail.
+
+    Missing keys OUTSIDE the required modules (e.g. a `semantic_encoder` that is
+    loaded separately from its own pretrained release) are reported but tolerated.
+    """
+    n_missing, n_unexpected = len(missing_keys), len(unexpected_keys)
+    log.info(
+        "Checkpoint load [%s]: %d missing, %d unexpected key(s)",
+        model_name, n_missing, n_unexpected,
+    )
+
+    required_missing = []
+    if require_modules:
+        prefixes = tuple(f"{m}." for m in require_modules)
+        required_missing = [k for k in missing_keys if k.startswith(prefixes)]
+
+    # Report (loudly if anything looks off).
+    show = lambda keys: keys[:10] + (["...(+%d more)" % (len(keys) - 10)] if len(keys) > 10 else [])
+    if n_unexpected:
+        log.warning("  [%s] unexpected tensors: %s", model_name, show(unexpected_keys))
+    if required_missing:
+        log.error("  [%s] MISSING trainable-module tensors: %s", model_name, show(required_missing))
+    elif n_missing:
+        log.warning(
+            "  [%s] %d missing tensor(s) OUTSIDE fine-tuned modules "
+            "(tolerated -- e.g. separately-loaded frozen backbone): %s",
+            model_name, n_missing, show(missing_keys),
+        )
+
+    problems = []
+    if strict_unexpected and n_unexpected:
+        problems.append(f"{n_unexpected} unexpected key(s) (checkpoint/model architecture mismatch)")
+    if required_missing:
+        problems.append(
+            f"{len(required_missing)} missing key(s) inside fine-tuned modules "
+            f"{list(require_modules)} -- warm-start would train these from random init"
+        )
+    if problems:
+        raise RuntimeError(
+            f"Checkpoint load for model '{model_name}' failed verification: "
+            + "; ".join(problems)
+            + ". Refusing to train from a partially-loaded checkpoint."
+        )
+
+
 def load_checkpoint(
-        models: Union[Dict[str, nn.Module], nn.Module], 
-        ckpt_path: Path
+        models: Union[Dict[str, nn.Module], nn.Module],
+        ckpt_path: Path,
+        require_modules_by_model: dict = None,
+        allow_missing_models=("discriminator",),
     ):
     """
-    Load models' states from a checkpoint file.
+    Load models' states from a checkpoint file, verifying the load did not silently
+    skip the weights we depend on.
 
     Args:
-        models (Union[Dict[str, nn.Module], nn.Module]): A single model or a dictionary of models to load states into.
-        ckpt_path (Path): The path of the checkpoint file from which to load states.
+        models: A single model or a dictionary of models to load states into.
+        ckpt_path: Path of the checkpoint file from which to load states.
+        require_modules_by_model: Optional {model_name: [submodule, ...]} of top-level
+            submodules that MUST be fully present in the checkpoint (the fine-tuned
+            modules). A missing key inside these is a hard error.
+        allow_missing_models: Model keys that may be entirely absent from the
+            checkpoint (the released X-VC `xvc.pt` ships no `discriminator`); such a
+            model keeps its freshly-initialized weights. Any OTHER absent model is a
+            hard error rather than a silent skip.
     """
     log.info("Checkpoint: loading from checkpoint %s" % ckpt_path)
 
     state_dict = torch.load(ckpt_path, map_location="cpu")
-    
+    require_modules_by_model = require_modules_by_model or {}
+
     if isinstance(models, dict):
         # If models is a dictionary, load state dictionaries individually
         for k in models:
+            if k not in state_dict:
+                # A wholly-absent model is tolerated only if explicitly allowed
+                # (e.g. the discriminator, unused when adversarial loss is off).
+                if k in allow_missing_models:
+                    log.warning(
+                        "checkpoint has no state for model '%s'; keeping its "
+                        "initialized weights (allowed)", k,
+                    )
+                    continue
+                raise RuntimeError(
+                    f"Checkpoint '{ckpt_path}' has no state for required model '{k}' "
+                    f"(present: {sorted(state_dict.keys())}). Refusing to train it "
+                    f"from random init."
+                )
             missing_keys, unexpected_keys = models[k].load_state_dict(
                 state_dict[k], strict=False
             )
-            # Log missing and unexpected tensors
-            for key in missing_keys:
-                log.info("missing tensor in model_{}: {}".format(k, key))
-            for key in unexpected_keys:
-                log.info("unexpected tensor in model_{}: {}".format(k, key))
+            _report_and_gate_load(
+                k, missing_keys, unexpected_keys,
+                require_modules=require_modules_by_model.get(k),
+            )
     else:
         # If a single model is provided, load the state dictionary directly
         missing_keys, unexpected_keys = models.load_state_dict(
                 state_dict, strict=False
             )
-        # Log missing and unexpected tensors
-        for key in missing_keys:
-            log.info("missing tensor in model: {}".format(key))
-        for key in unexpected_keys:
-            log.info("unexpected tensor in model: {}".format(key))
+        _report_and_gate_load(
+            "model", missing_keys, unexpected_keys,
+            require_modules=require_modules_by_model.get("model"),
+        )
 
 
 def save_checkpoints(

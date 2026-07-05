@@ -1,3 +1,4 @@
+import hashlib
 import os
 import time
 from typing import List, Tuple
@@ -15,10 +16,22 @@ def _to_device(device_id: int) -> torch.device:
     return torch.device("cpu")
 
 
+def _sha256_file(path: str, chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def load_xvc(config_path: str, ckpt_path: str, device_id: int, ema_load: bool):
     cfg = load_config(config_path)
     if "config" in cfg:
         cfg = cfg["config"]
+
+    # Identify EXACTLY which weights are being served/evaluated — checkpoint
+    # provenance is part of every result produced downstream.
+    print(f"[x-vc] checkpoint: {ckpt_path} sha256={_sha256_file(ckpt_path)}")
 
     args = {
         "config": config_path,

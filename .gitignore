@@ -42,6 +42,9 @@ ckpts/
 *.bin
 *.safetensors
 
+# HF publishing credentials (written by scripts/finetune.sh link prompt)
+.hf_publish.env
+
 # Local data
 data/
 pretrained/

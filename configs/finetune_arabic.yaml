@@ -1,0 +1,60 @@
+# Accent fine-tuning config: Arabic (ABA + SKA), "Option A" baseline.
+#
+# This is a thin overlay on configs/xvc.yaml (merged via the built-in `base_config`
+# mechanism in utils/file.load_config). It only sets what differs for fine-tuning;
+# everything else (full model architecture, pretrained-dependency paths) is inherited.
+#
+# Warm-start from the released X-VC checkpoint with a FRESH optimizer:
+#   torchrun --nproc_per_node=1 -m bins.train \
+#       --config configs/finetune_arabic.yaml \
+#       --train_engine deepspeed --deepspeed_config configs/ds_stage2.json \
+#       --checkpoint ckpts/xvc.pt --resume_step 0 \
+#       --log_dir exp/finetune_arabic
+# (see scripts/finetune.sh and docs/finetuning.md)
+
+base_config: configs/xvc.yaml
+
+#===========================|  Dataset (this accent only) |=====================#
+datasets:
+  train:
+    - data/finetuning_audio/manifests/arabic/train.jsonl
+  val:
+    - data/finetuning_audio/manifests/arabic/val.jsonl
+
+#===========================|  Self-reconstruction training |===================#
+dataloader:
+  reconstruction_ratio: 1.0   # every example: source == target (self-reconstruction)
+  reversed_ratio: 0.0         # never swap source/target
+  mask_target_condition: true # keep the target-condition masking
+  static:
+    batch_size: 8             # conservative; frozen backbone still runs each step
+
+#===========================|  Conservative fine-tune schedule |================#
+current_step: 0
+current_epoch: 0
+
+log_interval: 10
+val_interval: 100      # frequent validation -> pick best checkpoint
+save_interval: 250     # frequent checkpoints
+keep_interval: 250     # keep every 250-step milestone (all of them)
+total_step: 3000       # ~90 epochs over ~20 min of audio
+
+# Keep the adversarial/discriminator path OFF for this short reconstruction fine-tune
+# by setting the warmup beyond total_step (adv turns on only after this many steps).
+generator_warmup_steps: 100000
+
+# EMA off: the saved checkpoint is exactly the trained weights.
+ema_update: false
+
+# Flags consumed by the fine-tune trainer changes (see docs/finetuning.md):
+run_validation: true         # re-enable the in-loop validation (disabled upstream)
+freeze_eval_backbone: true   # force frozen modules (e.g. ERes2Net) to .eval() each epoch
+
+#===========================|  Freeze all but converter + prenet |==============#
+model:
+  generator:
+    # Whitelist read by utils.train_utils.freeze_model_parameters:
+    # freeze the whole generator, then re-enable only these submodules.
+    trainable_modules: [acoustic_converter, prenet]
+    optim_conf:
+      lr: 0.00001            # 1e-5, 10x below pretraining

@@ -28,6 +28,7 @@ from utils.train_utils import (
     params_statistic,
     print_model,
     seed_everything,
+    verify_trainable_modules,
     wrap_cuda_model,
 )
 
@@ -107,6 +108,11 @@ def main():
 
     # Statistic model scale
     params_statistic(models)
+
+    # Hard gate: the freeze must have produced exactly the requested trainable set
+    # (prenet + acoustic_converter for the accent fine-tune). Fails loudly at
+    # startup if a module was left unfrozen or a whitelist entry was misspelled.
+    verify_trainable_modules(models, config)
 
     wrap_cuda_model(args, models)
 

@@ -49,7 +49,7 @@ def add_model_args(parser):
     )
     parser.add_argument("--log_dir", required=True, help="save results dir")
     parser.add_argument("--checkpoint", help="checkpoint of models")
-    parser.add_argument("--seed", default=1234)
+    parser.add_argument("--seed", default=1234, type=int)
     return parser
 
 
@@ -260,7 +260,16 @@ def init_models(args, config):
 
     # load checkpoint from pre-trained model
     elif args.checkpoint is not None:
-        load_checkpoint(models, args.checkpoint)
+        # Require the fine-tuned modules to load in full: a warm start that silently
+        # dropped prenet/acoustic_converter would train them from random init.
+        require_modules_by_model = {
+            k: list(config.model[k]["trainable_modules"])
+            for k in config.model
+            if config.model[k].get("trainable_modules", None) is not None
+        }
+        load_checkpoint(
+            models, args.checkpoint, require_modules_by_model=require_modules_by_model
+        )
         log.info("load pre-trained generator model from {}".format(args.checkpoint))
     # load checkoint from pre-trained model respectively
     for model_name in config.model:
@@ -280,41 +289,178 @@ def init_models(args, config):
 def freeze_model_parameters(models, config):
     # Disable gradient computations for parameters of specific models as defined in the configuration.
     for model_name in config.model:
-        if config.model[model_name].get("no_grad", False):
+        model_cfg = config.model[model_name]
+
+        # (1) Whole-model freeze.
+        if model_cfg.get("no_grad", False):
             for param in models[model_name].parameters():
                 param.requires_grad = False
-        else:
-            for sub_model_name in config.model[model_name]:
-                sub_moodel_config = config.model[model_name][sub_model_name]
-                if hasattr(sub_moodel_config, "get") and sub_moodel_config.get("no_grad", False):
-                    sub_model = getattr(models[model_name], sub_model_name)
-                    for param in sub_model.parameters():
-                        param.requires_grad = False
+            continue
+
+        # (2) Whitelist-based freezing (fine-tuning). If `trainable_modules` is set,
+        # freeze the entire model and then re-enable gradients only for the listed
+        # submodules; everything not named stays frozen. This is how the accent
+        # fine-tuning configs keep only `acoustic_converter` and `prenet` trainable.
+        trainable_modules = model_cfg.get("trainable_modules", None)
+        if trainable_modules is not None:
+            for param in models[model_name].parameters():
+                param.requires_grad = False
+            for sub_name in trainable_modules:
+                if not hasattr(models[model_name], sub_name):
+                    log.warning(
+                        "trainable_modules: '%s' is not a submodule of '%s'; skipping",
+                        sub_name, model_name,
+                    )
+                    continue
+                sub_model = getattr(models[model_name], sub_name)
+                if not isinstance(sub_model, nn.Module):
+                    log.warning(
+                        "trainable_modules: '%s.%s' is not an nn.Module; skipping",
+                        model_name, sub_name,
+                    )
+                    continue
+                for param in sub_model.parameters():
+                    param.requires_grad = True
+            continue
+
+        # (3) Legacy per-submodule freezing via `no_grad` on each submodule config.
+        for sub_model_name in model_cfg:
+            sub_moodel_config = model_cfg[sub_model_name]
+            if hasattr(sub_moodel_config, "get") and sub_moodel_config.get("no_grad", False):
+                sub_model = getattr(models[model_name], sub_model_name)
+                for param in sub_model.parameters():
+                    param.requires_grad = False
+
+
+def verify_trainable_modules(models: Dict[str, nn.Module], config):
+    """Hard gate: confirm the freeze actually produced the trainable set we asked for.
+
+    For every model that declares a `trainable_modules` whitelist (the accent
+    fine-tune configs list `[acoustic_converter, prenet]`), assert that:
+
+      * the set of top-level submodules that own >=1 `requires_grad` parameter is
+        EXACTLY that whitelist -- no more (a stray unfrozen module) and no less (a
+        misspelled entry that silently froze everything);
+      * no whitelisted submodule ended up fully frozen (typo / wrong name);
+      * every trainable parameter in the model lives under a whitelisted submodule.
+
+    For every model marked `no_grad: True`, assert it has zero trainable params.
+
+    Raises AssertionError with a readable diff on any mismatch, so a broken freeze
+    fails at startup instead of training "successfully" from the wrong parameters.
+    Returns the total trainable-parameter count (also logged).
+    """
+    total_trainable = 0
+    for model_name in config.model:
+        model = models[model_name]
+        model_cfg = config.model[model_name]
+
+        # Submodules that actually carry trainable params after the freeze.
+        live = set()
+        for sub_name, sub in model.named_children():
+            if any(p.requires_grad for p in sub.parameters()):
+                live.add(sub_name)
+        model_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_trainable += model_trainable
+
+        if model_cfg.get("no_grad", False):
+            assert model_trainable == 0, (
+                f"[freeze] model '{model_name}' is no_grad but has "
+                f"{model_trainable} trainable params (live submodules: {sorted(live)})"
+            )
+            continue
+
+        whitelist = model_cfg.get("trainable_modules", None)
+        if whitelist is None:
+            # Not a whitelist-frozen model (e.g. an unused discriminator); nothing
+            # to assert here -- its trainability is governed elsewhere.
+            continue
+
+        expected = set(whitelist)
+        # 1) named whitelist entries must exist as submodules
+        missing_named = [m for m in expected if not hasattr(model, m)]
+        assert not missing_named, (
+            f"[freeze] trainable_modules for '{model_name}' name non-existent "
+            f"submodules {missing_named}; available: {[n for n, _ in model.named_children()]}"
+        )
+        # 2) live trainable submodules must equal the whitelist exactly
+        extra = sorted(live - expected)      # unfrozen but not requested -> leak
+        absent = sorted(expected - live)     # requested but frozen -> typo/empty
+        assert not extra and not absent, (
+            f"[freeze] model '{model_name}': trainable submodules {sorted(live)} "
+            f"!= requested {sorted(expected)}"
+            + (f"; UNEXPECTEDLY TRAINABLE: {extra}" if extra else "")
+            + (f"; REQUESTED BUT FROZEN: {absent}" if absent else "")
+        )
+        # 3) no trainable parameter may live outside a whitelisted submodule
+        #    (catches params attached directly to the model, not via a child)
+        prefixes = tuple(f"{m}." for m in expected)
+        stray = [
+            n for n, p in model.named_parameters()
+            if p.requires_grad and not n.startswith(prefixes)
+        ]
+        assert not stray, (
+            f"[freeze] model '{model_name}' has trainable params outside "
+            f"{sorted(expected)}: {stray[:8]}{' ...' if len(stray) > 8 else ''}"
+        )
+        if int(os.environ.get("RANK", 0)) == 0:
+            log.info(
+                "[freeze] '%s' verified: trainable submodules == %s (%.3fM params)",
+                model_name, sorted(expected), model_trainable / 1e6,
+            )
+
+    if int(os.environ.get("RANK", 0)) == 0:
+        log.info("[freeze] total trainable parameters: %.3fM", total_trainable / 1e6)
+    return total_trainable
 
 
 def params_statistic(models: Dict[str, nn.Module]):
-    # statistic model parameter number
-    num_param_dict = {}
-    num_trainable_param_dict = {}
+    # Report total / trainable / frozen parameter counts, with a per-submodule
+    # breakdown so the effect of freezing (which modules are actually trainable)
+    # is visible at startup.
+    total_num_params = 0
+    total_num_trainable_params = 0
+    lines = []
 
     for model_name, model in models.items():
-        total_params = sum(p.numel() for p in model.parameters()) / 1e6
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-        num_param_dict[model_name] = total_params
-        num_trainable_param_dict[model_name] = trainable_params
+        total = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        frozen = total - trainable
+        total_num_params += total
+        total_num_trainable_params += trainable
 
-    total_num_params = sum(num_param_dict.values())
-    total_num_trainable_params = sum(num_trainable_param_dict.values())
-
-    num_param_info = "".join([
-        "{} params scale {:.2f}M, trainable {:.2f}M\n".format(
-            k, num_param_dict[k], num_trainable_param_dict[k]
+        lines.append(
+            "{}: total {:.2f}M | trainable {:.2f}M | frozen {:.2f}M".format(
+                model_name, total / 1e6, trainable / 1e6, frozen / 1e6
+            )
         )
-        for k in models.keys()
-    ])
-    num_param_info += "total params scale {:.2f}M, trainable {:.2f}M\n".format(
-        total_num_params, total_num_trainable_params
+        # One level of submodules (e.g. acoustic_converter, prenet, ...).
+        for sub_name, sub_module in model.named_children():
+            sub_total = sum(p.numel() for p in sub_module.parameters())
+            if sub_total == 0:
+                continue
+            sub_trainable = sum(p.numel() for p in sub_module.parameters() if p.requires_grad)
+            if sub_trainable == sub_total:
+                state = "trainable"
+            elif sub_trainable == 0:
+                state = "frozen"
+            else:
+                state = "partial"
+            lines.append(
+                "    - {:<20s} {:8.3f}M  [{}]".format(sub_name, sub_total / 1e6, state)
+            )
+
+    total_num_frozen_params = total_num_params - total_num_trainable_params
+    pct = 100.0 * total_num_trainable_params / max(total_num_params, 1)
+    lines.append(
+        "TOTAL: {:.2f}M | trainable {:.2f}M ({:.1f}%) | frozen {:.2f}M".format(
+            total_num_params / 1e6,
+            total_num_trainable_params / 1e6,
+            pct,
+            total_num_frozen_params / 1e6,
+        )
     )
+    num_param_info = "\n".join(lines)
 
     if int(os.environ.get("RANK", 0)) == 0:
         log.info("Model parameters statistic:\n{}".format(num_param_info))
@@ -459,13 +605,26 @@ def init_optimizer_and_scheduler(args, config, models):
                 optimizers[k] = None
                 schedulers[k] = None
                 continue
+            # Only optimize parameters that require gradients. With a frozen
+            # backbone (fine-tuning), this keeps optimizer/ZeRO state limited to
+            # the trainable modules and avoids DeepSpeed ZeRO-2 issues with
+            # parameters that never receive gradients.
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            if len(trainable_params) == 0:
+                log.warning(
+                    "model '%s' has no trainable parameters; skipping optimizer/scheduler", k
+                )
+                optimizers[k] = None
+                schedulers[k] = None
+                continue
+
             if config.model[k]["optim"] == "adam":
                 optimizers[k] = optim.Adam(
-                    model.parameters(), **config.model[k]["optim_conf"]
+                    trainable_params, **config.model[k]["optim_conf"]
                 )
             elif config.model[k]["optim"] == "adamw":
                 optimizers[k] = optim.AdamW(
-                    model.parameters(), **config.model[k]["optim_conf"]
+                    trainable_params, **config.model[k]["optim_conf"]
                 )
             else:
                 raise ValueError("unknown optimizer: " + config.model[k]["optim"])
@@ -510,7 +669,7 @@ def init_optimizer_and_scheduler(args, config, models):
                     model=model,
                     optimizer=optimizers[k],
                     lr_scheduler=schedulers[k],
-                    model_parameters=model.parameters(),
+                    model_parameters=[p for p in model.parameters() if p.requires_grad],
                 )
             else:
                 models[k] = model
