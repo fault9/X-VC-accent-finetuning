@@ -157,7 +157,12 @@ def _manifests_from_config(config) -> List[str]:
     manifests: List[str] = []
     for split in ("train", "val"):
         entry = config["datasets"][split]
-        manifests.extend(list(entry) if isinstance(entry, (list, tuple)) else [entry])
+        # entry may be a str, list, or OmegaConf ListConfig (which is neither
+        # list nor tuple) — coerce every element to str.
+        if isinstance(entry, str):
+            manifests.append(entry)
+        else:
+            manifests.extend(str(m) for m in entry)
     return manifests
 
 
