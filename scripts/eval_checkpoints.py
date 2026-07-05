@@ -118,9 +118,20 @@ def _concat_wavs(paths: List[Path], dst: Path, seconds: float) -> List[str]:
         used.append(p.name)
         if total >= seconds:
             break
+    # Cross-fade joins (20ms) — hard splices click, and the reference feeds the
+    # frame-condition path, so splice artifacts can leak into rendering.
+    sr = params.framerate
+    xf = max(1, 20 * sr // 1000)
+    out = pieces[0].astype(np.float32)
+    ramp = np.linspace(0.0, 1.0, xf, dtype=np.float32)
+    for piece in pieces[1:]:
+        nxt = piece.astype(np.float32)
+        n = min(xf, len(out), len(nxt))
+        out[-n:] = out[-n:] * (1 - ramp[-n:]) + nxt[:n] * ramp[-n:]
+        out = np.concatenate([out, nxt[n:]])
     with wave.open(str(dst), "wb") as w:
         w.setparams(params)
-        w.writeframes(np.concatenate(pieces).tobytes())
+        w.writeframes(np.clip(out, -32768, 32767).astype(np.int16).tobytes())
     return used
 
 
