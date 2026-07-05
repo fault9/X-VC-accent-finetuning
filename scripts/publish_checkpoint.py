@@ -209,6 +209,11 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="action", required=True)
 
     default_repo = os.environ.get("XVC_PUBLISH_REPO")
+    if default_repo:
+        # tolerate URL-ish values: leading/trailing slashes, full hf.co URLs, quotes
+        default_repo = default_repo.strip().strip("'\"")
+        default_repo = default_repo.removeprefix("https://huggingface.co/")
+        default_repo = default_repo.strip("/") or None
 
     p = sub.add_parser("push", help="upload a checkpoint to a HF model repo")
     p.add_argument("--repo-id", required=default_repo is None, default=default_repo,
