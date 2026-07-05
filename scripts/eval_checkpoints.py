@@ -75,26 +75,52 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
 # --------------------------------------------------------------------------- #
 # make-targets: pin one reference clip per speaker (deterministic)
 # --------------------------------------------------------------------------- #
+def _trim_silence(x, sr: int, thresh_db: float = -40.0, pad_ms: int = 50):
+    """Trim leading/trailing low-energy samples (frame RMS gate), keep small pads."""
+    import numpy as np
+
+    frame = sr // 100  # 10ms
+    n = len(x) // frame
+    if n == 0:
+        return x
+    rms = np.sqrt((x[: n * frame].reshape(n, frame).astype(np.float64) ** 2).mean(axis=1))
+    ref = rms.max() or 1.0
+    db = 20 * np.log10(np.maximum(rms / ref, 1e-10))
+    voiced = np.nonzero(db > thresh_db)[0]
+    if len(voiced) == 0:
+        return x
+    pad = pad_ms * sr // 1000
+    start = max(0, voiced[0] * frame - pad)
+    end = min(len(x), (voiced[-1] + 1) * frame + pad)
+    return x[start:end]
+
+
 def _concat_wavs(paths: List[Path], dst: Path, seconds: float) -> List[str]:
-    """Concatenate 16k mono PCM16 wavs into dst until >= seconds. Returns names used."""
+    """Concatenate 16k mono PCM16 wavs (silence-trimmed) into dst until >= seconds
+    of actual speech. Returns names used."""
     import wave
 
+    import numpy as np
+
     used = []
-    frames = b""
+    pieces = []
     params = None
     total = 0.0
     for p in paths:
         with wave.open(str(p), "rb") as w:
             if params is None:
                 params = w.getparams()
-            frames += w.readframes(w.getnframes())
-            total += w.getnframes() / float(w.getframerate())
+            sr = w.getframerate()
+            x = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+        x = _trim_silence(x, sr)
+        pieces.append(x)
+        total += len(x) / float(sr)
         used.append(p.name)
         if total >= seconds:
             break
     with wave.open(str(dst), "wb") as w:
         w.setparams(params)
-        w.writeframes(frames)
+        w.writeframes(np.concatenate(pieces).tobytes())
     return used
 
 
