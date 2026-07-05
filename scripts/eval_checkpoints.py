@@ -244,6 +244,28 @@ class AccentClassifier:
         return label[0], float(score.exp().item() if hasattr(score, "exp") else score)
 
 
+class MOSPredictor:
+    """Predicted MOS (UTMOS22-strong via torch.hub, tarepan/SpeechMOS).
+
+    Captures the synthesis-quality axis that cosine/WER are blind to
+    (robotic texture, gating, artifacts). Scores the model's raw 16k output,
+    before any loudnorm/resample post-processing.
+    """
+
+    def __init__(self, device: str):
+        import torch
+        self.device = device
+        self.model = torch.hub.load(
+            "tarepan/SpeechMOS:v1.2.0", "utmos22_strong", trust_repo=True
+        ).to(device).eval()
+
+    def score(self, wav_np, sr: int) -> float:
+        import torch
+        with torch.inference_mode():
+            x = torch.from_numpy(wav_np).float().unsqueeze(0).to(self.device)
+            return float(self.model(x, sr).item())
+
+
 def maybe_loudnorm(wav, sr: int, target_lufs: float):
     """EBU R128 loudness-normalize a float mono array. Returns (wav, measured_lufs)."""
     import numpy as np
@@ -365,11 +387,13 @@ def cmd_run(args) -> int:
 
     accent_clf = AccentClassifier("cuda" if torch.cuda.is_available() else "cpu") \
         if args.accent_clf else None
+    mos_model = MOSPredictor("cuda" if torch.cuda.is_available() else "cpu") \
+        if args.mos else None
 
     rows = []
     fieldnames = ["step", "mode", "source", "target", "sim_cosine", "wer", "wer_mode",
-                  "dur_source_s", "dur_out_s", "dur_delta_pct", "accent_label",
-                  "accent_conf", "lufs_in", "avg_latency_ms", "out_path"]
+                  "mos_pred", "dur_source_s", "dur_out_s", "dur_delta_pct",
+                  "accent_label", "accent_conf", "lufs_in", "avg_latency_ms", "out_path"]
 
     for ck in ckpts:
         step = ck["step"]
@@ -414,6 +438,8 @@ def cmd_run(args) -> int:
                 dur_src = source_wav.shape[-1] / sr
                 dur_out = len(out_np) / sr
 
+                mos = mos_model.score(out_np, sr) if mos_model is not None else None
+
                 # ERes2Net cosine: converted output vs the pinned target reference.
                 with torch.inference_mode():
                     out_t = torch.from_numpy(out_np).float().to(device)
@@ -442,6 +468,7 @@ def cmd_run(args) -> int:
                 rows.append({
                     "step": step, "mode": mode, "source": src.stem, "target": t.stem,
                     "sim_cosine": round(sim, 4), "wer": wer, "wer_mode": wmode,
+                    "mos_pred": round(mos, 3) if mos is not None else None,
                     "dur_source_s": round(dur_src, 3), "dur_out_s": round(dur_out, 3),
                     "dur_delta_pct": round(100.0 * (dur_out - dur_src) / max(dur_src, 1e-6), 2),
                     "accent_label": alabel,
@@ -477,6 +504,7 @@ def cmd_run(args) -> int:
             "n": len(sub),
             "sim_cosine_mean": agg([r["sim_cosine"] for r in sub]),
             "wer_mean": agg([r["wer"] for r in sub]),
+            "mos_pred_mean": agg([r["mos_pred"] for r in sub]),
             "abs_dur_delta_pct_mean": agg([abs(r["dur_delta_pct"]) for r in sub]),
             "avg_latency_ms": agg([r["avg_latency_ms"] for r in sub]),
         })
@@ -489,6 +517,7 @@ def cmd_run(args) -> int:
     for s in summary:
         print(f"  step {str(s['step']):>6s} | sim {s['sim_cosine_mean']} | "
               f"wer {s['wer_mean']} | |dur%| {s['abs_dur_delta_pct_mean']}"
+              + (f" | mos {s['mos_pred_mean']}" if s["mos_pred_mean"] else "")
               + (f" | lat {s['avg_latency_ms']}ms" if s["avg_latency_ms"] else ""))
     print(f"\nmetrics.csv / summary.csv / samples/ under {out_root}")
     print("Listen to samples/<step>/ before freezing anything — ears gate metrics.")
@@ -530,6 +559,9 @@ def main(argv=None) -> int:
     r.add_argument("--skip-wer", action="store_true")
     r.add_argument("--accent-clf", action="store_true",
                    help="CommonAccent ECAPA accent-ID confidence (needs speechbrain)")
+    r.add_argument("--mos", action="store_true",
+                   help="predicted MOS per conversion (UTMOS22-strong via torch.hub; "
+                        "measures the robotic/artifact axis that cosine and WER miss)")
     r.add_argument("--loudnorm", action="store_true",
                    help="EBU R128 loudness-normalize saved samples (needs pyloudnorm)")
     r.add_argument("--loudnorm-lufs", type=float, default=-23.0)
