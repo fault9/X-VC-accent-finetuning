@@ -31,6 +31,9 @@ log_dir=""
 seed=1234
 lr=""
 wandb=0
+# DataLoader workers: 0 avoids /dev/shm entirely — required on containers with
+# the 64MB Docker default (workers pass batches through shared memory).
+num_workers=4
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --log_dir)      log_dir="$2"; shift 2 ;;
     --seed)         seed="$2"; shift 2 ;;
     --lr)           lr="$2"; shift 2 ;;
+    --num_workers)  num_workers="$2"; shift 2 ;;
     --wandb)        wandb=1; shift 1 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -86,7 +90,7 @@ if [[ "$accent" == "all" ]]; then
     [[ -n "$lr" ]] && extra+=(--lr "$lr")
     [[ "$wandb" -eq 1 ]] && extra+=(--wandb)
     bash "$script_dir/finetune.sh" --accent "$a" --checkpoint "$checkpoint" \
-      --gpus "$gpus" --port "$port" --seed "$seed" "${extra[@]}"
+      --gpus "$gpus" --port "$port" --seed "$seed" --num_workers "$num_workers" "${extra[@]}"
   done
   exit 0
 fi
@@ -161,7 +165,7 @@ torchrun --nnodes=1 --nproc_per_node="${gpus}" --master_port="${port}" \
     --deepspeed_config configs/ds_stage2.json \
     --resume_step "${resume_step}" \
     --seed "${seed}" \
-    --num_workers 4 \
+    --num_workers "${num_workers}" \
     --project "x-vc-finetune" \
     --date "${tag}" \
     ${wandb_arg} \

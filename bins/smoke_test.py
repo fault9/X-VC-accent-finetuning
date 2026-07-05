@@ -265,7 +265,8 @@ def forward_pass(config, batch=None, batch_size: Optional[int] = None):
 # of a fresh training program is discovering at step 5,000 that inference can't
 # load what training saves.
 # --------------------------------------------------------------------------- #
-def train_roundtrip(config_path: str, steps: int = 20, log_dir: Optional[str] = None):
+def train_roundtrip(config_path: str, steps: int = 20, log_dir: Optional[str] = None,
+                    num_workers: int = 2):
     import json
     import subprocess
     import tempfile
@@ -306,7 +307,7 @@ def train_roundtrip(config_path: str, steps: int = 20, log_dir: Optional[str] = 
         "--deepspeed_config", "configs/ds_stage2.json",
         "--resume_step", "0",
         "--checkpoint", str(ckpt),
-        "--num_workers", "2",
+        "--num_workers", str(num_workers),
         "--project", "smoke",
         "--date", "smoke",
     ]
@@ -372,6 +373,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Steps for the train roundtrip stage (default 20).",
     )
     parser.add_argument(
+        "--num-workers", type=int, default=2,
+        help="DataLoader workers for the train stage (default 2). Use 0 on "
+             "containers with a small /dev/shm (workers pass batches through "
+             "shared memory; 0 keeps loading in the main process).",
+    )
+    parser.add_argument(
         "--config", default=None,
         help="Fine-tune YAML (e.g. configs/finetune_arabic.yaml). Required for batch/forward.",
     )
@@ -428,7 +435,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("[skip] train: --config is required")
                 all_ok = False
                 continue
-            all_ok &= bool(train_roundtrip(args.config, steps=args.train_steps))
+            all_ok &= bool(train_roundtrip(args.config, steps=args.train_steps,
+                                           num_workers=args.num_workers))
         print()
 
     print("=" * 72)
