@@ -211,23 +211,27 @@ def init_dataset_and_dataloader(args, config, seed=777):
     train_dataset = train_dataset_sampler.sample()
     val_dataset = val_dataset_sampler.sample()
 
+    # num_workers=0 (single-process loading, e.g. tiny /dev/shm containers):
+    # torch forbids prefetch_factor and persistent_workers without workers.
+    multiproc = args.num_workers > 0
+    prefetch = args.prefetch if multiproc else None
     train_data_loader = DataLoader(
         train_dataset,
         batch_size=None,
         pin_memory=args.pin_memory,
         num_workers=args.num_workers,
-        persistent_workers=args.persistent_workers,
+        persistent_workers=args.persistent_workers if multiproc else False,
         generator=generator,
-        prefetch_factor=args.prefetch,
+        prefetch_factor=prefetch,
     )
     val_data_loader = DataLoader(
         val_dataset,
         batch_size=None,
         pin_memory=args.pin_memory,
         num_workers=args.num_workers,
-        persistent_workers=True,
+        persistent_workers=multiproc,
         generator=generator,
-        prefetch_factor=args.prefetch,
+        prefetch_factor=prefetch,
     )
 
     return train_data_loader, val_data_loader
