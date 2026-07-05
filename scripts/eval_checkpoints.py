@@ -75,6 +75,29 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
 # --------------------------------------------------------------------------- #
 # make-targets: pin one reference clip per speaker (deterministic)
 # --------------------------------------------------------------------------- #
+def _concat_wavs(paths: List[Path], dst: Path, seconds: float) -> List[str]:
+    """Concatenate 16k mono PCM16 wavs into dst until >= seconds. Returns names used."""
+    import wave
+
+    used = []
+    frames = b""
+    params = None
+    total = 0.0
+    for p in paths:
+        with wave.open(str(p), "rb") as w:
+            if params is None:
+                params = w.getparams()
+            frames += w.readframes(w.getnframes())
+            total += w.getnframes() / float(w.getframerate())
+        used.append(p.name)
+        if total >= seconds:
+            break
+    with wave.open(str(dst), "wb") as w:
+        w.setparams(params)
+        w.writeframes(frames)
+    return used
+
+
 def cmd_make_targets(args) -> int:
     data_root = Path(args.data_root)
     out_dir = Path(args.out)
@@ -88,17 +111,23 @@ def cmd_make_targets(args) -> int:
             if not wavs:
                 print(f"[warn] no val wavs for {spk_dir}", file=sys.stderr)
                 continue
-            # Deterministic: first alphabetically. The val split never trains,
+            # Deterministic: alphabetical order. The val split never trains,
             # so the reference is unseen by the loss.
-            ref = wavs[0]
             dst = out_dir / f"{spk_dir.name}.wav"
-            shutil.copy2(ref, dst)
+            if args.seconds:
+                used = _concat_wavs(wavs, dst, args.seconds)
+                src_desc = f"{len(used)} clips ({used[0]}..{used[-1]})"
+            else:
+                shutil.copy2(wavs[0], dst)
+                used = [wavs[0].name]
+                src_desc = wavs[0].name
             picked[spk_dir.name] = {
                 "group": group_dir.name,
-                "source": str(ref),
+                "source_dir": str(spk_dir),
+                "clips": used,
                 "sha256": sha256_file(dst),
             }
-            print(f"{group_dir.name:8s} {spk_dir.name:6s} <- {ref.name}")
+            print(f"{group_dir.name:8s} {spk_dir.name:6s} <- {src_desc}")
     # Remove wavs from previous rosters — the eval harness scans this directory,
     # so a stale target would silently re-enter the study.
     for wav in sorted(out_dir.glob("*.wav")):
@@ -438,6 +467,12 @@ def main(argv=None) -> int:
     t = sub.add_parser("make-targets", help="pin one reference clip per speaker from the val split")
     t.add_argument("--data-root", default="data/finetuning_audio")
     t.add_argument("--out", default="data/eval_targets")
+    t.add_argument("--seconds", type=float, default=None,
+                   help="concatenate the speaker's val clips (alphabetical) until the "
+                        "reference reaches this many seconds (default: single clip). "
+                        "Longer references stabilize the speaker embedding; ~15-20s "
+                        "is a good budget. Changes the pinned stimulus definition — "
+                        "re-run evals after re-pinning.")
     t.set_defaults(func=cmd_make_targets)
 
     r = sub.add_parser("run", help="evaluate checkpoints: convert, measure, rank")
