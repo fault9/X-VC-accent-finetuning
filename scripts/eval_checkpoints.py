@@ -151,7 +151,7 @@ def cmd_make_targets(args) -> int:
             # Deterministic: alphabetical order. The val split never trains,
             # so the reference is unseen by the loss.
             dst = out_dir / f"{spk_dir.name}.wav"
-            if args.seconds:
+            if args.seconds and args.seconds > 0:
                 used = _concat_wavs(wavs, dst, args.seconds)
                 src_desc = f"{len(used)} clips ({used[0]}..{used[-1]})"
             else:
@@ -504,12 +504,14 @@ def main(argv=None) -> int:
     t = sub.add_parser("make-targets", help="pin one reference clip per speaker from the val split")
     t.add_argument("--data-root", default="data/finetuning_audio")
     t.add_argument("--out", default="data/eval_targets")
-    t.add_argument("--seconds", type=float, default=None,
-                   help="concatenate the speaker's val clips (alphabetical) until the "
-                        "reference reaches this many seconds (default: single clip). "
-                        "Longer references stabilize the speaker embedding; ~15-20s "
-                        "is a good budget. Changes the pinned stimulus definition — "
-                        "re-run evals after re-pinning.")
+    t.add_argument("--seconds", type=float, default=15.0,
+                   help="concatenate the speaker's silence-trimmed val clips "
+                        "(alphabetical, cross-faded) until the reference reaches this "
+                        "many seconds of speech (default 15; 0 = single clip). 15s won "
+                        "the listening ladder: it stabilizes the speaker embedding, "
+                        "while 30s is out-of-distribution for the frame-condition path "
+                        "and reintroduces artifacts. Changes the pinned stimulus "
+                        "definition — re-run evals after re-pinning.")
     t.set_defaults(func=cmd_make_targets)
 
     r = sub.add_parser("run", help="evaluate checkpoints: convert, measure, rank")

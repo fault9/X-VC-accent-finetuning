@@ -56,7 +56,11 @@ python scripts/prepare_finetuning_data.py select --minutes-per-speaker 10
 # (sha256 per manifest, per-speaker minutes, gender tally)
 python scripts/prepare_finetuning_data.py manifest --joint
 
-# pin one reference clip per speaker from the val split (stimulus definition)
+# pin one reference per speaker from the val split (stimulus definition):
+# ~15s of silence-trimmed, cross-faded val clips. 15s won the listening ladder
+# (longer stabilizes the speaker embedding; 30s is out-of-distribution for the
+# frame-condition path and reintroduces artifacts). Use the SAME references for
+# eval, stimuli generation, and HMO sessions.
 python scripts/eval_checkpoints.py make-targets --out data/eval_targets
 ```
 
