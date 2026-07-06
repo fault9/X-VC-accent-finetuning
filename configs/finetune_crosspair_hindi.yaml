@@ -1,0 +1,58 @@
+# ACCENT-CONVERSION pilot (Option B, phase B1): teach native->accented mapping.
+#
+# Data: parallel cross pairs (scripts/build_crosspairs.py) — native source
+# (bdl/rms/clb/slt) paired with the SAME ARCTIC prompt read by a Hindi speaker
+# (ASI/TNI), target uniformly time-stretched to the source's duration so the
+# frame-aligned losses see approximately aligned frames. Gender-matched pairs.
+#
+# KEY DIFFERENCES from the self-reconstruction recipes:
+#   * reconstruction_ratio 0.0 — source != target; the dataloader must NOT
+#     rewrite pairs to self-reconstruction (it does when this is > 0).
+#   * semantic_adapter is unfrozen — accent transformation is a content-side
+#     edit; the two rendering modules alone may be architecturally unable.
+#
+# Success gate (B1): CommonAccent P(indian) rises on converted native speech
+# vs stock, WER < ~0.05, output intelligible. See docs + task list.
+#
+#   bash scripts/finetune.sh --accent crosspair_hindi --num_workers 0
+
+base_config: configs/xvc.yaml
+
+#===========================|  Dataset (parallel cross pairs) |=================#
+datasets:
+  train:
+    - data/crosspair_hindi/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi/manifests/val.jsonl
+
+#===========================|  Cross-pair training |============================#
+dataloader:
+  reconstruction_ratio: 0.0   # CRITICAL: keep pairs as pairs (see header)
+  reversed_ratio: 0.0         # never swap roles — direction is native->accented
+  mask_target_condition: true
+  static:
+    batch_size: 8
+
+#===========================|  Pilot schedule |=================================#
+current_step: 0
+current_epoch: 0
+
+log_interval: 10
+val_interval: 100
+save_interval: 250
+keep_interval: 250
+total_step: 1500       # thin slice — B1 is a signal probe, not a product run
+
+# Adversarial path off (warmup beyond total_step), EMA off, as in all recipes.
+generator_warmup_steps: 100000
+ema_update: false
+
+run_validation: true
+freeze_eval_backbone: true
+
+#===========================|  Freeze: converter + prenet + adapter |===========#
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet, semantic_adapter]
+    optim_conf:
+      lr: 0.00003            # 3e-5 — the A/B winner from the accent fine-tunes
