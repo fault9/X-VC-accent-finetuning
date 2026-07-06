@@ -239,6 +239,29 @@ def _local_stretch_ratios(time_map: list[tuple[int, int]]) -> np.ndarray:
     return delta[:, 1] / delta[:, 0]
 
 
+def _latent_alignment_positions(
+    time_map: list[tuple[int, int]],
+    source_len: int,
+    target_len: int,
+    frame_hop: int = 320,
+) -> np.ndarray:
+    """Map target 50-Hz frame centres to normalized source time.
+
+    The normalized representation is independent of small encoder boundary
+    differences. Training uses it to sample both post-adapter WhisperVQ
+    features and quantized SAC acoustic features onto the target timeline.
+    """
+    if source_len < 2 or target_len < frame_hop:
+        raise ValueError("audio is too short for latent alignment")
+    points = np.asarray(time_map, dtype=np.float64)
+    target_frames = target_len // frame_hop
+    target_centres = (np.arange(target_frames, dtype=np.float64) + 0.5) * frame_hop
+    source_samples = np.interp(target_centres, points[:, 0], points[:, 1])
+    positions = source_samples / float(source_len - 1)
+    positions = np.maximum.accumulate(np.clip(positions, 0.0, 1.0))
+    return positions.astype(np.float32)
+
+
 def _rms_dbfs(audio: np.ndarray) -> float:
     rms = float(np.sqrt(np.mean(np.asarray(audio, dtype=np.float64) ** 2)))
     return 20.0 * np.log10(max(rms, 1e-12))
@@ -482,6 +505,7 @@ def wav_duration(path: Path) -> float:
 def filter_input_rows(
     rows: list[dict],
     l2_root: Path,
+    source_root: Path,
     minimum: float,
     min_global_stretch: float,
     max_global_stretch: float,
@@ -490,6 +514,8 @@ def filter_input_rows(
     stats = {"short": 0, "global_stretch": 0}
     for row in rows:
         source = Path(row["source_wav_path"])
+        if not source.is_absolute():
+            source = source_root / source
         target = raw_target_path(row, l2_root)
         source_duration = wav_duration(source)
         target_duration = wav_duration(target)
@@ -577,6 +603,10 @@ def main() -> int:
                     help="repair legacy leaky manifests by combining them and "
                          "holding out this many prompt IDs globally")
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--source-root", default=".",
+        help="root used to resolve relative source_wav_path values",
+    )
     ap.add_argument("--l2-root", default="D:/datasets/arctic-audio/l2arctic",
                     help="raw L2 root — align the RAW target (single warp), not the "
                          "build's pre-stretched one (avoids double time-warp artifacts)")
@@ -591,8 +621,11 @@ def main() -> int:
                     help="optional pair IDs or SPEAKER:prompt IDs to omit")
     ap.add_argument("--prompts-file",
                     help="optional L2-ARCTIC PROMPTS file copied into the dataset")
-    ap.add_argument("--warp-method", choices=("ola", "rubberband"), default="ola",
-                    help="target warp backend; default preserves the validated B2 OLA path")
+    ap.add_argument(
+        "--warp-method", choices=("ola", "rubberband", "latent"), default="ola",
+        help="alignment backend; latent keeps both waveforms pristine and "
+             "writes a training-only source-feature time map",
+    )
     ap.add_argument(
         "--warp-side", choices=("target", "source"), default="target",
         help="side to time-warp: target preserves the native timeline; source "
@@ -614,6 +647,7 @@ def main() -> int:
         ap.error("--warp-side source currently requires --warp-method rubberband")
 
     out = Path(args.out)
+    source_root = Path(args.source_root)
     l2_root = Path(args.l2_root)
     splits = {
         "train": load_manifest(args.train_manifest),
@@ -637,7 +671,7 @@ def main() -> int:
     skipped_global_stretch = 0
     for name in splits:
         splits[name], filter_stats = filter_input_rows(
-            splits[name], l2_root, args.min_duration,
+            splits[name], l2_root, source_root, args.min_duration,
             args.min_global_stretch, args.max_global_stretch,
         )
         skipped_duration += filter_stats["short"]
@@ -702,12 +736,54 @@ def main() -> int:
     for split, rows in splits.items():
         for r in rows:
             src_path = Path(r["source_wav_path"])
+            if not src_path.is_absolute():
+                src_path = source_root / src_path
             src = read_wav(str(src_path))
             # Re-derive the raw L2 target; never warp the already stretched B1 file.
             raw_tgt_path = raw_target_path(r, l2_root)
             tgt_raw = read_wav(str(raw_tgt_path))
             path = dtw_path(mfcc_cmn(src), mfcc_cmn(tgt_raw))
-            if args.warp_method == "rubberband":
+            alignment_positions = None
+            if args.warp_method == "latent":
+                try:
+                    time_map = _rubberband_time_map(
+                        path, source_len=len(src), target_len=len(tgt_raw),
+                        anchor_hop_frames=args.anchor_hop_frames,
+                    )
+                    original_anchor_count = len(time_map)
+                    time_map, anchors_removed = _stabilize_time_map(
+                        time_map,
+                        min_ratio=args.min_local_stretch,
+                        max_ratio=args.max_local_stretch,
+                        target_len=len(tgt_raw),
+                    )
+                    pair_ratios = _local_stretch_ratios(time_map)
+                    alignment_positions = _latent_alignment_positions(
+                        time_map, source_len=len(src), target_len=len(tgt_raw)
+                    )
+                except ValueError as exc:
+                    skipped_pathological += 1
+                    print(f"  [skip] {r['source_utt']}: {exc}")
+                    continue
+                removal_fraction = anchors_removed / original_anchor_count
+                if removal_fraction > args.max_anchor_removal_fraction:
+                    skipped_anchor_repairs += 1
+                    print(
+                        f"  [skip] {r['source_utt']}: removed "
+                        f"{removal_fraction:.1%} of DTW anchors"
+                    )
+                    continue
+                local_stretch_ratios.extend(pair_ratios.tolist())
+                removed_anchor_counts.append(anchors_removed)
+                length_delta = 0
+                # Diagnostic only. Neither waveform written to the latent
+                # dataset is time-warped.
+                diagnostic_warp = warp_target_to_source(src, tgt_raw, path)
+                train_src, train_tgt = src, tgt_raw
+                uniform = uniform_resample_len(tgt_raw, len(src))
+                pair_dtw_distance = mel_dist(src, diagnostic_warp)
+                pair_resample_distance = mel_dist(src, uniform)
+            elif args.warp_method == "rubberband":
                 try:
                     (warped, length_delta, pair_ratios, anchors_removed,
                      original_anchor_count) = rubberband_warp_target_to_source(
@@ -740,26 +816,29 @@ def main() -> int:
                 anchors_removed = 0
                 original_anchor_count = 0
 
-            if args.warp_side == "source":
-                train_src = warped
-                train_tgt = tgt_raw
-                uniform = uniform_resample_len(src, len(tgt_raw))
-            else:
-                train_src = src
-                train_tgt = warped
-                uniform = uniform_resample_len(tgt_raw, len(src))
+            if args.warp_method != "latent":
+                if args.warp_side == "source":
+                    train_src = warped
+                    train_tgt = tgt_raw
+                    uniform = uniform_resample_len(src, len(tgt_raw))
+                else:
+                    train_src = src
+                    train_tgt = warped
+                    uniform = uniform_resample_len(tgt_raw, len(src))
 
-            # Fitted diagnostic only; independent QC happens in
-            # validate_crosspairs.py. Both arguments are on the selected
-            # training timeline for either warp direction.
-            pair_dtw_distance = mel_dist(train_src, train_tgt)
-            pair_resample_distance = mel_dist(uniform, train_tgt)
+                # Fitted diagnostic only; independent QC happens in
+                # validate_crosspairs.py. Both arguments are on the selected
+                # training timeline for either warp direction.
+                pair_dtw_distance = mel_dist(train_src, train_tgt)
+                pair_resample_distance = mel_dist(uniform, train_tgt)
             d_dtw.append(pair_dtw_distance)
             d_uni.append(pair_resample_distance)
 
             src_out = out / "wavs" / "src" / src_path.name
             src_out.parent.mkdir(parents=True, exist_ok=True)
-            if args.warp_side == "source":
+            if args.warp_method == "latent":
+                shutil.copyfile(src_path, src_out)
+            elif args.warp_side == "source":
                 write_wav(src_out, train_src)
             elif not src_out.exists():
                 # copy2/copy preserves POSIX timestamps, which can fail on a
@@ -767,7 +846,10 @@ def main() -> int:
                 # relevant to the training dataset.
                 shutil.copyfile(src_path, src_out)
             tgt_out = out / "wavs" / "tgt" / Path(r["target_wav_path"]).name
-            if args.warp_side == "source":
+            if args.warp_method == "latent":
+                tgt_out.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(raw_tgt_path, tgt_out)
+            elif args.warp_side == "source":
                 # Do not requantize or otherwise process the supervision
                 # waveform. Byte-for-byte identity is checked by the validator.
                 tgt_out.parent.mkdir(parents=True, exist_ok=True)
@@ -799,6 +881,11 @@ def main() -> int:
             rr["raw_source_wav_path"] = str(raw_src_out).replace("\\", "/")
             rr["raw_target_wav_path"] = str(raw_tgt_out).replace("\\", "/")
             rr["target_reference_wav_path"] = str(ref_out).replace("\\", "/")
+            if alignment_positions is not None:
+                alignment_out = out / "alignment" / f"{r['source_utt']}.npy"
+                alignment_out.parent.mkdir(parents=True, exist_ok=True)
+                np.save(alignment_out, alignment_positions, allow_pickle=False)
+                rr["latent_alignment_path"] = str(alignment_out).replace("\\", "/")
             rr["raw_source_duration"] = round(len(src) / SR, 6)
             rr["raw_target_duration"] = round(len(tgt_raw) / SR, 6)
             rows_out[split].append(rr)
@@ -807,7 +894,10 @@ def main() -> int:
                 "source_utt": r["source_utt"],
                 "target_key": target_key(r),
                 "prompt_id": prompt_id(r),
-                "warp_side": args.warp_side,
+                "warp_side": (
+                    "latent_features" if args.warp_method == "latent"
+                    else args.warp_side
+                ),
                 "raw_source_duration": round(len(src) / SR, 6),
                 "raw_target_duration": round(len(tgt_raw) / SR, 6),
                 "global_stretch_ratio": round(len(src) / len(tgt_raw), 6),
@@ -880,9 +970,12 @@ def main() -> int:
             for split, rows in rows_out.items()
         },
         "warp_method": args.warp_method,
-        "warp_side": args.warp_side,
+        "warp_side": (
+            "latent_features" if args.warp_method == "latent" else args.warp_side
+        ),
         "anchor_hop_frames": (
-            args.anchor_hop_frames if args.warp_method == "rubberband" else None
+            args.anchor_hop_frames
+            if args.warp_method in {"rubberband", "latent"} else None
         ),
         "rubberband_version": (
             rubberband_version() if args.warp_method == "rubberband" else None

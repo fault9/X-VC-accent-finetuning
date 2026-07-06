@@ -1,0 +1,41 @@
+# Controlled latent-alignment pilot. Native and accented waveforms remain
+# pristine. A DTW map resamples both frozen native source streams (post-adapter
+# WhisperVQ semantics and quantized SAC acoustics) onto the accented timeline.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_ab/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_ab/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true
+  static:
+    # The first smoke deliberately encodes one natural-length source at a time,
+    # preventing padded audio from entering either frozen source encoder.
+    batch_size: 1
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 50
+save_interval: 250
+keep_interval: 250
+total_step: 250
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    optim_conf:
+      lr: 0.00003

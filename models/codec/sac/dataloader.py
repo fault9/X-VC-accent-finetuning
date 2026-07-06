@@ -82,6 +82,7 @@ class VCSSLWAVDataset(BaseDataset):
         reconstruct_ratio: Optional[float] = None,
         swap_ratio: Optional[float] = None,
         mask_cond: Optional[bool] = None,
+        latent_alignment: bool = False,
         seed: int = 42,
         **kwargs,
     ) -> None:
@@ -93,6 +94,7 @@ class VCSSLWAVDataset(BaseDataset):
         self.reconstruction_ratio = reconstruct_ratio if reconstruct_ratio is not None else reconstruction_ratio
         self.reversed_ratio = swap_ratio if swap_ratio is not None else reversed_ratio
         self.mask_target_condition = mask_cond if mask_cond is not None else mask_target_condition
+        self.latent_alignment = latent_alignment
         self.seed = seed
         random.seed(seed)
         
@@ -112,6 +114,12 @@ class VCSSLWAVDataset(BaseDataset):
         source_wav_path = elem["source_wav_path"]
         target_wav_path = elem["target_wav_path"]
         target_reference_wav_path = elem.get("target_reference_wav_path")
+        latent_alignment_path = elem.get("latent_alignment_path")
+
+        if self.latent_alignment and not latent_alignment_path:
+            raise ValueError("latent_alignment=True but manifest has no latent_alignment_path")
+        if latent_alignment_path and not self.latent_alignment:
+            raise ValueError("manifest has latent alignment but dataloader mode is disabled")
 
         rand = random.random()
         role_assignment_mode = "standard"
@@ -139,6 +147,10 @@ class VCSSLWAVDataset(BaseDataset):
             offline = bool(cfg["offline_feature_extracted"])
             ssl_ratio = int(cfg["ssl_per_sem_ratio"])
             feat, ssl_feat, sim_feat = None, None, None
+            alignment_positions = (
+                np.load(latent_alignment_path, allow_pickle=False).astype(np.float32)
+                if self.latent_alignment else None
+            )
 
             source_wav = load_audio(source_wav_path, sr, volume_normalize=True, length=None)
             target_wav = load_audio(target_wav_path, sr, volume_normalize=True, length=None)
@@ -174,7 +186,11 @@ class VCSSLWAVDataset(BaseDataset):
             else:
                 T_tok, T_ssl = None, None
 
-            T_wav = int(len(source_wav) // hop)
+            # Normal X-VC follows the source timeline. Latent alignment follows
+            # the pristine target timeline and remaps frozen source features in
+            # the model instead of modifying either waveform.
+            timeline_wav = target_wav if self.latent_alignment else source_wav
+            T_wav = int(len(timeline_wav) // hop)
             if T_tok is None:
                 T = T_wav
             else:
@@ -184,7 +200,8 @@ class VCSSLWAVDataset(BaseDataset):
             
             length = T // align_k * align_k
             wav_length = length * hop
-            source_wav = source_wav[:wav_length]
+            if not self.latent_alignment:
+                source_wav = source_wav[:wav_length]
             target_wav = target_wav[:wav_length]
 
             if feat is not None:
@@ -194,7 +211,11 @@ class VCSSLWAVDataset(BaseDataset):
                 ssl_len = length * ssl_ratio
                 ssl_feat = ssl_feat[:ssl_len]
 
-            if not self.train:
+            if self.latent_alignment:
+                # The repository collator fixes wave batches at 2.4 s. Keep
+                # validation maps on that same timeline as well.
+                seg_dur_eff = seg_dur
+            elif not self.train:
                 cur_dur = (length * hop) / sr
                 seg_dur_eff = min(cur_dur, float(cfg["max_val_duration"]))
             else:
@@ -206,7 +227,10 @@ class VCSSLWAVDataset(BaseDataset):
             ssl_segment_length = seg_T * ssl_ratio
 
             if wav_segment_length > wav_length:
-                source_wav = np.pad(source_wav, (0, int(wav_segment_length - wav_length)))
+                if not self.latent_alignment:
+                    source_wav = np.pad(
+                        source_wav, (0, int(wav_segment_length - wav_length))
+                    )
                 target_wav = np.pad(target_wav, (0, int(wav_segment_length - wav_length)))
                 if feat is not None:                    
                     pad_tok = torch.zeros(seg_T - length, dtype=feat.dtype, device=feat.device)
@@ -226,18 +250,47 @@ class VCSSLWAVDataset(BaseDataset):
                     hi = max(0, length - seg_T)
                     start_indice = random.randint(0, hi)
 
+            alignment_source_tensor = (
+                torch.from_numpy(source_wav.copy()).float()
+                if self.latent_alignment else None
+            )
             source_wav = torch.from_numpy(source_wav)
             target_wav = torch.from_numpy(target_wav)
-            max_len = max(source_wav.shape[0], target_wav.shape[0])
-            source_wav = F.pad(source_wav, (0, max_len - source_wav.shape[0]))
-            target_wav = F.pad(target_wav, (0, max_len - target_wav.shape[0]))
+            if not self.latent_alignment:
+                max_len = max(source_wav.shape[0], target_wav.shape[0])
+                source_wav = F.pad(source_wav, (0, max_len - source_wav.shape[0]))
+                target_wav = F.pad(target_wav, (0, max_len - target_wav.shape[0]))
  
             end_indice = start_indice + seg_T
             wav_start_indice = start_indice * hop
             wav_end_indice = end_indice * hop
 
             feat_segment = feat[start_indice:end_indice] if feat is not None else None
-            source_wav_segment = source_wav[wav_start_indice:wav_end_indice]
+            if self.latent_alignment:
+                # The real source is carried separately at its natural length.
+                # A fixed-size zero placeholder prevents accidental fallback to
+                # waveform-aligned training if the model-side gate is missing.
+                source_wav_segment = torch.zeros(
+                    wav_segment_length, dtype=target_wav.dtype
+                )
+                align_start = start_indice * ssl_ratio
+                align_end = end_indice * ssl_ratio
+                alignment_segment = torch.from_numpy(
+                    alignment_positions[align_start:align_end]
+                ).float()
+                if alignment_segment.numel() < ssl_segment_length:
+                    pad_value = (
+                        float(alignment_segment[-1])
+                        if alignment_segment.numel() else 0.0
+                    )
+                    alignment_segment = F.pad(
+                        alignment_segment,
+                        (0, ssl_segment_length - alignment_segment.numel()),
+                        value=pad_value,
+                    )
+            else:
+                source_wav_segment = source_wav[wav_start_indice:wav_end_indice]
+                alignment_segment = None
             target_wav_segment = target_wav[wav_start_indice:wav_end_indice]
 
             source_wav_cond = source_wav
@@ -284,6 +337,12 @@ class VCSSLWAVDataset(BaseDataset):
                     if target_reference_tensor is not None else None
                 ),
                 "source_wav_cond": source_wav_cond.float(),
+                "alignment_source_wav": alignment_source_tensor,
+                "alignment_source_length": (
+                    int(alignment_source_tensor.numel())
+                    if alignment_source_tensor is not None else None
+                ),
+                "latent_alignment_positions": alignment_segment,
                 "role_assignment_mode": role_assignment_mode,
                 # "target_wav_full": target_wav.float(),
             }
@@ -299,6 +358,9 @@ class VCSSLWAVDataset(BaseDataset):
                 "target_wav_cond": None,
                 "target_reference_wav": None,
                 "source_wav_cond": None,
+                "alignment_source_wav": None,
+                "alignment_source_length": None,
+                "latent_alignment_positions": None,
                 "role_assignment_mode": None,
             }
 
@@ -354,5 +416,20 @@ class VCSSLWAVDataset(BaseDataset):
             collate_batch["source_wav_cond"] = padded_wavs.unsqueeze(1)
         else:
             collate_batch["source_wav_cond"] = None
+
+        if batch[0].get("alignment_source_wav") is not None:
+            wav_list = [b["alignment_source_wav"] for b in batch]
+            padded = pad_sequence(wav_list, batch_first=True, padding_value=0.0)
+            collate_batch["alignment_source_wav"] = padded.unsqueeze(1)
+            collate_batch["alignment_source_length"] = torch.tensor(
+                [b["alignment_source_length"] for b in batch], dtype=torch.long
+            )
+            collate_batch["latent_alignment_positions"] = torch.stack(
+                [b["latent_alignment_positions"] for b in batch], dim=0
+            )
+        else:
+            collate_batch["alignment_source_wav"] = None
+            collate_batch["alignment_source_length"] = None
+            collate_batch["latent_alignment_positions"] = None
 
         return collate_batch

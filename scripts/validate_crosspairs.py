@@ -131,12 +131,13 @@ def main() -> int:
                 failures.append(
                     f"{label}: sample rates source={source_rate}, target={target_rate}"
                 )
-            if len(source_audio) != len(target_audio):
+            latent_mode = align_meta.get("warp_method") == "latent"
+            if len(source_audio) != len(target_audio) and not latent_mode:
                 failures.append(
                     f"{label}: duration mismatch source={len(source_audio)}, "
                     f"target={len(target_audio)} samples"
                 )
-            duration = len(source_audio) / source_rate
+            duration = len(target_audio if latent_mode else source_audio) / source_rate
             durations.append(duration)
             if duration < args.min_duration:
                 failures.append(
@@ -175,10 +176,17 @@ def main() -> int:
             reference_value = row.get("target_reference_wav_path")
             raw_source_value = row.get("raw_source_wav_path")
             raw_target_value = row.get("raw_target_wav_path")
+            alignment_value = row.get("latent_alignment_path")
             if align_meta.get("warp_method") == "rubberband" and not raw_target_value:
                 failures.append(f"{label}: missing raw_target_wav_path")
             if align_meta.get("warp_side") == "source" and not raw_source_value:
                 failures.append(f"{label}: source-side warp missing raw_source_wav_path")
+            if latent_mode and not raw_source_value:
+                failures.append(f"{label}: latent alignment missing raw_source_wav_path")
+            if latent_mode and not raw_target_value:
+                failures.append(f"{label}: latent alignment missing raw_target_wav_path")
+            if latent_mode and not alignment_value:
+                failures.append(f"{label}: missing latent_alignment_path")
             if raw_source_value:
                 raw_source = Path(raw_source_value)
                 if not raw_source.is_file():
@@ -195,6 +203,12 @@ def main() -> int:
                                 f"{label}: raw source duration "
                                 f"{len(raw_source_audio) / raw_source_rate:.3f}s "
                                 f"< {args.min_duration:.3f}s"
+                            )
+                        if latent_mode and not np.array_equal(
+                            source_audio, raw_source_audio
+                        ):
+                            failures.append(
+                                f"{label}: latent-alignment source is not pristine"
                             )
                     except Exception as exc:
                         failures.append(f"{label}: bad raw source: {exc}")
@@ -214,7 +228,10 @@ def main() -> int:
                                 f"< {args.min_duration:.3f}s"
                             )
                         if (
-                            align_meta.get("warp_side") == "source"
+                            (
+                                align_meta.get("warp_side") == "source"
+                                or latent_mode
+                            )
                             and not np.array_equal(target_audio, raw_audio)
                         ):
                             failures.append(
@@ -223,6 +240,33 @@ def main() -> int:
                             )
                     except Exception as exc:
                         failures.append(f"{label}: bad raw target: {exc}")
+            if alignment_value:
+                alignment_path = Path(alignment_value)
+                if not alignment_path.is_file():
+                    failures.append(
+                        f"{label}: missing latent alignment: {alignment_path}"
+                    )
+                else:
+                    try:
+                        positions = np.load(alignment_path, allow_pickle=False)
+                        expected = len(target_audio) // 320
+                        if positions.ndim != 1 or len(positions) != expected:
+                            failures.append(
+                                f"{label}: latent map shape={positions.shape}, "
+                                f"expected ({expected},)"
+                            )
+                        if not np.all(np.isfinite(positions)):
+                            failures.append(f"{label}: latent map has non-finite values")
+                        if len(positions) and (
+                            float(np.min(positions)) < 0.0
+                            or float(np.max(positions)) > 1.0
+                            or np.any(np.diff(positions) < 0.0)
+                        ):
+                            failures.append(
+                                f"{label}: latent map must be monotonic in [0,1]"
+                            )
+                    except Exception as exc:
+                        failures.append(f"{label}: bad latent alignment: {exc}")
             if align_meta.get("warp_method") == "rubberband" and not reference_value:
                 failures.append(f"{label}: missing clean target_reference_wav_path")
             if reference_value:
@@ -255,18 +299,19 @@ def main() -> int:
                     except Exception as exc:
                         failures.append(f"{label}: bad clean reference: {exc}")
 
-    if align_meta.get("warp_method") == "rubberband":
+    if align_meta.get("warp_method") in {"rubberband", "latent"}:
         version = str(align_meta.get("rubberband_version", ""))
         engine = align_meta.get("rubberband_engine")
-        try:
-            major = int(version.split(".", 1)[0].split()[-1])
-        except (ValueError, IndexError):
-            major = 0
-        if major < 3 or engine != "r3":
-            failures.append(
-                f"align_meta: final dataset requires Rubber Band >=3 R3; "
-                f"got version={version!r}, engine={engine!r}"
-            )
+        if align_meta.get("warp_method") == "rubberband":
+            try:
+                major = int(version.split(".", 1)[0].split()[-1])
+            except (ValueError, IndexError):
+                major = 0
+            if major < 3 or engine != "r3":
+                failures.append(
+                    f"align_meta: final dataset requires Rubber Band >=3 R3; "
+                    f"got version={version!r}, engine={engine!r}"
+                )
         local = align_meta.get("local_stretch_ratio") or {}
         ratio_epsilon = 1e-3  # align_meta stores rounded summary statistics
         if local and (

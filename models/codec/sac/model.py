@@ -149,6 +149,98 @@ class XVC(nn.Module):
         model.to(device).eval()
         return model
 
+    @staticmethod
+    def _sample_bct_at_normalized_positions(
+        features: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Linearly sample ``B x C x T`` features at normalized positions."""
+        if features.ndim != 3 or positions.ndim != 2:
+            raise ValueError(
+                f"expected BCT features and BT positions, got "
+                f"{features.shape} and {positions.shape}"
+            )
+        if features.shape[0] != positions.shape[0] or features.shape[-1] < 1:
+            raise ValueError("latent alignment batch/time dimensions are invalid")
+        scaled = positions.clamp(0.0, 1.0) * (features.shape[-1] - 1)
+        lower = scaled.floor().long()
+        upper = (lower + 1).clamp(max=features.shape[-1] - 1)
+        weight = (scaled - lower).unsqueeze(1).to(features.dtype)
+        gather_shape = (-1, features.shape[1], -1)
+        lo = torch.gather(features, 2, lower.unsqueeze(1).expand(*gather_shape))
+        hi = torch.gather(features, 2, upper.unsqueeze(1).expand(*gather_shape))
+        return lo + (hi - lo) * weight
+
+    @staticmethod
+    def _sample_bct_nearest(
+        features: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Nearest-frame sampling for quantized/codebook feature streams."""
+        scaled = positions.clamp(0.0, 1.0) * (features.shape[-1] - 1)
+        indices = scaled.round().long().unsqueeze(1).expand(
+            -1, features.shape[1], -1
+        )
+        return torch.gather(features, 2, indices)
+
+    def _latent_aligned_source(self, inputs: dict):
+        """Encode pristine source audio, then align both frozen source streams.
+
+        This is training-only. The smoke intentionally requires batch size one
+        so padding can never influence WhisperVQ or SAC encoder outputs.
+        """
+        source = inputs["alignment_source_wav"]
+        lengths = inputs["alignment_source_length"]
+        positions = inputs["latent_alignment_positions"]
+        if source is None or lengths is None or positions is None:
+            raise RuntimeError("incomplete latent-alignment batch")
+        if source.shape[0] != 1:
+            raise RuntimeError(
+                "latent-alignment smoke requires dataloader.static.batch_size=1"
+            )
+        valid_length = int(lengths[0].item())
+        if valid_length <= 0 or valid_length > source.shape[-1]:
+            raise RuntimeError("invalid pristine source length")
+        source = source[:, :, :valid_length]
+
+        semantic_tokens = self.semantic_encoder.extract_and_encode(
+            source.squeeze(1)
+        )["speech_tokens"]
+        sem_emb = self.semantic_encoder.embed_ids(semantic_tokens)
+        if not self.semantic_adapter:
+            raise RuntimeError("x-vc requires `semantic_adapter`.")
+        sem_emb = self.semantic_adapter(
+            sem_emb.transpose(1, 2)
+        ).transpose(1, 2)
+
+        if not self.acoustic_encoder or not self.acoustic_quantizer:
+            raise RuntimeError("latent alignment requires acoustic encoder/quantizer")
+        acoustic_encoder_out = self.acoustic_encoder(source)
+        aq_outputs = self.acoustic_quantizer(acoustic_encoder_out)
+        if len(aq_outputs) == 7:
+            zq_a, _, a_commit_loss, a_codebook_loss, _, a_perplexity, a_cluster_size = aq_outputs
+            vq_loss = (a_commit_loss + a_codebook_loss).mean()
+        elif len(aq_outputs) == 5:
+            zq_a, _, vq_loss, a_perplexity, a_cluster_size = aq_outputs
+            if isinstance(vq_loss, tuple):
+                vq_loss = vq_loss[0]
+        elif len(aq_outputs) == 2:
+            zq_a, _ = aq_outputs
+            vq_loss, a_perplexity, a_cluster_size = 0, 0, 0
+        else:
+            raise RuntimeError("Unexpected acoustic_quantizer output format.")
+
+        positions = positions.to(device=source.device, dtype=sem_emb.dtype)
+        sem_emb = self._sample_bct_at_normalized_positions(
+            sem_emb.transpose(1, 2), positions
+        ).transpose(1, 2)
+        zq_a = self._sample_bct_nearest(zq_a, positions)
+        acoustic_encoder_out = self._sample_bct_at_normalized_positions(
+            acoustic_encoder_out, positions
+        )
+        return (
+            sem_emb, zq_a, acoustic_encoder_out,
+            vq_loss, a_perplexity, a_cluster_size,
+        )
+
     def forward(self, inputs: dict):
         """
         Forward pass of x-vc.
@@ -159,12 +251,16 @@ class XVC(nn.Module):
         target_reference_wav = inputs.get("target_reference_wav", None)
         target_wav_cond = inputs.get("target_wav_cond", target_wav)
         ssl_feat = inputs.get("ssl_feat", None)
+        latent_alignment = inputs.get("latent_alignment_positions", None) is not None
 
         # Note: online feature extraction is not supported yet.
         feat = semantic_tokens
 
         if feat is None:
-            feat = self.semantic_encoder.extract_and_encode(source_wav.squeeze(1))["speech_tokens"]
+            if not latent_alignment:
+                feat = self.semantic_encoder.extract_and_encode(
+                    source_wav.squeeze(1)
+                )["speech_tokens"]
             ssl_feat = self.semantic_encoder.extract_and_encode(target_wav.squeeze(1))["whisper_hidden_states_50hz"]
 
         # xvc simplified condition path:
@@ -184,34 +280,41 @@ class XVC(nn.Module):
 
         frame_condition = self.mel_extractor(target_wav_cond)
 
-        sem_emb = self.semantic_encoder.embed_ids(feat)  # B x T_s x D_s
-
-        if self.semantic_adapter:
-            sem_emb = self.semantic_adapter(sem_emb.transpose(1, 2)).transpose(1, 2)
+        if latent_alignment:
+            (
+                sem_emb, zq_a, acoustic_encoder_out,
+                vq_loss, a_perplexity, a_cluster_size,
+            ) = self._latent_aligned_source(inputs)
+            a_indices = None
         else:
-            raise RuntimeError("x-vc requires `semantic_adapter`.")
+            sem_emb = self.semantic_encoder.embed_ids(feat)  # B x T_s x D_s
 
-        if self.acoustic_encoder:
-            acoustic_encoder_out = self.acoustic_encoder(source_wav)   # B x 1 x T_a -> B x D_a x T_a
-        else:
-            raise RuntimeError("x-vc requires `acoustic_encoder`.")
-
-        if self.acoustic_quantizer:
-            aq_outputs = self.acoustic_quantizer(acoustic_encoder_out)
-            if len(aq_outputs) == 7:
-                zq_a, a_indices, a_commit_loss, a_codebook_loss, _, a_perplexity, a_cluster_size = aq_outputs
-                vq_loss = (a_commit_loss + a_codebook_loss).mean()
-            elif len(aq_outputs) == 5:
-                zq_a, a_indices, vq_loss, a_perplexity, a_cluster_size = aq_outputs
-                if isinstance(vq_loss, tuple):
-                    vq_loss = vq_loss[0]
-            elif len(aq_outputs) == 2:
-                zq_a, a_indices = aq_outputs
-                vq_loss, a_perplexity, a_cluster_size = 0.0, 0.0, 0
+            if self.semantic_adapter:
+                sem_emb = self.semantic_adapter(sem_emb.transpose(1, 2)).transpose(1, 2)
             else:
-                raise RuntimeError("Unexpected acoustic_quantizer output format.")
-        else:
-            raise RuntimeError("x-vc requires `acoustic_quantizer`.")
+                raise RuntimeError("x-vc requires `semantic_adapter`.")
+
+            if self.acoustic_encoder:
+                acoustic_encoder_out = self.acoustic_encoder(source_wav)
+            else:
+                raise RuntimeError("x-vc requires `acoustic_encoder`.")
+
+            if self.acoustic_quantizer:
+                aq_outputs = self.acoustic_quantizer(acoustic_encoder_out)
+                if len(aq_outputs) == 7:
+                    zq_a, a_indices, a_commit_loss, a_codebook_loss, _, a_perplexity, a_cluster_size = aq_outputs
+                    vq_loss = (a_commit_loss + a_codebook_loss).mean()
+                elif len(aq_outputs) == 5:
+                    zq_a, a_indices, vq_loss, a_perplexity, a_cluster_size = aq_outputs
+                    if isinstance(vq_loss, tuple):
+                        vq_loss = vq_loss[0]
+                elif len(aq_outputs) == 2:
+                    zq_a, a_indices = aq_outputs
+                    vq_loss, a_perplexity, a_cluster_size = 0.0, 0.0, 0
+                else:
+                    raise RuntimeError("Unexpected acoustic_quantizer output format.")
+            else:
+                raise RuntimeError("x-vc requires `acoustic_quantizer`.")
 
         acu_emb = zq_a.transpose(1, 2)  # B x T_a x D_a
         combined_emb = torch.cat([sem_emb, acu_emb], dim=2)  # B x T x (D_s + D_a)
