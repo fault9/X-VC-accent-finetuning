@@ -1,0 +1,46 @@
+# ACCENT-CONVERSION pilot B2: DTW-ALIGNED cross pairs, adapter frozen.
+#
+# B1 (uniform stretch) collapsed regardless of module set — root cause was
+# alignment, not modules (proven by the refreeze-adapter ablation collapsing
+# identically). This run trains on DTW-aligned pairs (scripts/align_crosspairs.py,
+# measured ~22% tighter framewise mel-distance than uniform), with the SAFE
+# module set (converter+prenet only — the set that never collapsed on coherent
+# data). If this keeps intelligibility (WER stays low, MOS stays high) we then
+# check for accent; if intelligible-but-no-accent, retry with semantic_adapter
+# unfrozen at LOWER lr on the same aligned data.
+#
+#   bash scripts/finetune.sh --accent crosspair_hindi_dtw --num_workers 0
+
+base_config: configs/xvc.yaml
+
+datasets:
+  train:
+    - data/crosspair_hindi_dtw/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_dtw/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 250
+keep_interval: 250
+total_step: 1500
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]   # SAFE set first
+    optim_conf:
+      lr: 0.00003
