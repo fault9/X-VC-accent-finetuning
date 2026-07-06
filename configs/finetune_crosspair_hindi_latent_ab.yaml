@@ -17,9 +17,9 @@ dataloader:
   mask_target_condition: true
   latent_alignment: true
   static:
-    # The first smoke deliberately encodes one natural-length source at a time,
-    # preventing padded audio from entering either frozen source encoder.
-    batch_size: 1
+    # Exposure-match the source-warp A/B. Model-side latent alignment encodes
+    # each item separately at its natural length before stacking aligned latents.
+    batch_size: 8
 
 current_step: 0
 current_epoch: 0
