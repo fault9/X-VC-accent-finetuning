@@ -53,6 +53,13 @@ def load_pair_as_tensors(
 ):
     source_wav_np = process_audio(source_wav_path, cfg, latent_hop_length)
     target_wav_np = process_audio(target_wav_path, cfg, latent_hop_length)
+    if cfg.get("reference_duration") is not None:
+        reference_samples = int(float(cfg["reference_duration"]) * int(cfg["sample_rate"]))
+        if len(target_wav_np) < reference_samples:
+            raise ValueError(
+                f"target reference must be at least {float(cfg['reference_duration']):.2f}s"
+            )
+        target_wav_np = target_wav_np[:reference_samples]
 
     source_wav = torch.from_numpy(source_wav_np).unsqueeze(0).unsqueeze(1).float().to(device)
     target_wav = torch.from_numpy(target_wav_np).unsqueeze(0).unsqueeze(1).float().to(device)

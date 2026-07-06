@@ -156,6 +156,7 @@ class XVC(nn.Module):
         semantic_tokens = inputs.get("semantic_tokens", None)
         source_wav = inputs["source_wav"]
         target_wav = inputs["target_wav"]
+        target_reference_wav = inputs.get("target_reference_wav", None)
         target_wav_cond = inputs.get("target_wav_cond", target_wav)
         ssl_feat = inputs.get("ssl_feat", None)
 
@@ -174,7 +175,11 @@ class XVC(nn.Module):
         if not self.mel_extractor:
             raise RuntimeError("x-vc requires `mel_extractor`.")
         with torch.no_grad():
-            gt_sim_feat, _ = self.speaker_encoder(target_wav)
+            speaker_wav = (
+                target_reference_wav
+                if target_reference_wav is not None else target_wav
+            )
+            gt_sim_feat, _ = self.speaker_encoder(speaker_wav)
             speaker_condition = gt_sim_feat
 
         frame_condition = self.mel_extractor(target_wav_cond)
@@ -260,6 +265,7 @@ class XVC(nn.Module):
         semantic_tokens = inputs.get("semantic_tokens", None)
         source_wav = inputs["source_wav"]
         target_wav = inputs["target_wav"]
+        target_reference_wav = inputs.get("target_reference_wav", None)
         target_wav_cond = inputs.get("target_wav_cond", target_wav)
         ssl_feat = inputs.get("ssl_feat", None)
 
@@ -278,7 +284,11 @@ class XVC(nn.Module):
         if not self.mel_extractor:
             raise RuntimeError("x-vc requires `mel_extractor`.")
         with torch.no_grad():
-            gt_sim_feat, _ = self.speaker_encoder(target_wav)
+            speaker_wav = (
+                target_reference_wav
+                if target_reference_wav is not None else target_wav
+            )
+            gt_sim_feat, _ = self.speaker_encoder(speaker_wav)
             speaker_condition = gt_sim_feat
 
         frame_condition = self.mel_extractor(target_wav_cond)

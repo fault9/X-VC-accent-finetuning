@@ -111,6 +111,7 @@ class VCSSLWAVDataset(BaseDataset):
         semantic_token_path = elem['source_token_path'] if 'source_token_path' in elem else None
         source_wav_path = elem["source_wav_path"]
         target_wav_path = elem["target_wav_path"]
+        target_reference_wav_path = elem.get("target_reference_wav_path")
 
         rand = random.random()
         role_assignment_mode = "standard"
@@ -141,9 +142,24 @@ class VCSSLWAVDataset(BaseDataset):
 
             source_wav = load_audio(source_wav_path, sr, volume_normalize=True, length=None)
             target_wav = load_audio(target_wav_path, sr, volume_normalize=True, length=None)
+            target_reference_wav = (
+                load_audio(target_reference_wav_path, sr, volume_normalize=True, length=None)
+                if target_reference_wav_path else None
+            )
+            if target_reference_wav is not None:
+                reference_samples = int(float(cfg.get("reference_duration", 3.0)) * sr)
+                if len(target_reference_wav) < reference_samples:
+                    raise ValueError(
+                        f"clean target reference is shorter than {reference_samples / sr:.2f}s"
+                    )
+                target_reference_wav = target_reference_wav[:reference_samples]
             if hp_cut != 0:
                 source_wav = audio_highpass_filter(source_wav, sr, hp_cut)
                 target_wav = audio_highpass_filter(target_wav, sr, hp_cut)
+                if target_reference_wav is not None:
+                    target_reference_wav = audio_highpass_filter(
+                        target_reference_wav, sr, hp_cut
+                    )
                 if source_wav is None or target_wav is None:
                     raise ValueError("highpass returned None")
             
@@ -225,12 +241,27 @@ class VCSSLWAVDataset(BaseDataset):
             target_wav_segment = target_wav[wav_start_indice:wav_end_indice]
 
             source_wav_cond = source_wav
-            target_wav_cond = target_wav
-            if self.mask_target_condition:
-                mask = torch.ones_like(target_wav_cond)
-                mask[wav_start_indice:wav_end_indice] = 0.0
-                source_wav_cond = source_wav_cond * mask
-                target_wav_cond = target_wav_cond * mask
+            if target_reference_wav is not None:
+                # Match deployment: a clean, different-prompt target reference
+                # followed by a silent generation window.  Do not feed warped
+                # target artifacts into the conditioning pathway.
+                reference_tensor = torch.from_numpy(target_reference_wav).float()
+                if self.mask_target_condition:
+                    target_wav_cond = torch.cat([
+                        reference_tensor,
+                        torch.zeros(wav_segment_length, dtype=reference_tensor.dtype),
+                    ])
+                else:
+                    target_wav_cond = reference_tensor
+                target_reference_tensor = reference_tensor
+            else:
+                target_wav_cond = target_wav
+                target_reference_tensor = None
+                if self.mask_target_condition:
+                    mask = torch.ones_like(target_wav_cond)
+                    mask[wav_start_indice:wav_end_indice] = 0.0
+                    source_wav_cond = source_wav_cond * mask
+                    target_wav_cond = target_wav_cond * mask
 
             if ssl_feat is not None:
                 ssl_start_indice = start_indice * ssl_ratio
@@ -248,6 +279,10 @@ class VCSSLWAVDataset(BaseDataset):
                 "ssl_feat": ssl_feat_segment.float() if ssl_feat_segment is not None else None,
                 "sim_feat": sim_feat.float() if sim_feat is not None else None,
                 "target_wav_cond": target_wav_cond.float(),
+                "target_reference_wav": (
+                    target_reference_tensor.float()
+                    if target_reference_tensor is not None else None
+                ),
                 "source_wav_cond": source_wav_cond.float(),
                 "role_assignment_mode": role_assignment_mode,
                 # "target_wav_full": target_wav.float(),
@@ -262,6 +297,7 @@ class VCSSLWAVDataset(BaseDataset):
                 "target_wav": None,
                 "ssl_feat": None,
                 "target_wav_cond": None,
+                "target_reference_wav": None,
                 "source_wav_cond": None,
                 "role_assignment_mode": None,
             }
@@ -303,6 +339,13 @@ class VCSSLWAVDataset(BaseDataset):
             collate_batch["target_wav_cond"] = padded_wavs.unsqueeze(1)
         else:
             collate_batch["target_wav_cond"] = None
+
+        if batch[0].get("target_reference_wav") is not None:
+            wav_list = [b["target_reference_wav"] for b in batch]
+            padded_wavs = pad_sequence(wav_list, batch_first=True, padding_value=0.0)
+            collate_batch["target_reference_wav"] = padded_wavs.unsqueeze(1)
+        else:
+            collate_batch["target_reference_wav"] = None
         
         if "source_wav_cond" in batch[0]:
             wav_list = [b["source_wav_cond"] for b in batch]

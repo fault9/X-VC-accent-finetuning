@@ -1,0 +1,38 @@
+# Final quality-filtered native-to-Hindi accent run.
+# Build and audit data/crosspair_hindi_rubberband first, then create
+# data/crosspair_hindi_rubberband_filtered with filter_crosspairs.py.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_rubberband_filtered/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_rubberband_filtered/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 250
+keep_interval: 250
+total_step: 1500
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    optim_conf:
+      lr: 0.00003

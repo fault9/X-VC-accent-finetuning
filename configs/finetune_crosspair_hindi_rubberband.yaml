@@ -1,0 +1,50 @@
+# Native-to-Hindi accent pilot using DTW pairs warped with Rubber Band R3.
+# Dataset construction must pass scripts/validate_crosspairs.py, including:
+#   * globally disjoint prompt splits
+#   * raw source and target duration >= 3 seconds
+#   * Rubber Band >=3 with the R3/Finer engine
+#   * clean, different-prompt ASI/TNI reference conditioning
+#   * bounded local DTW stretch ratios
+#
+#   bash scripts/finetune.sh --accent crosspair_hindi_rubberband --num_workers 0
+
+base_config: configs/xvc.yaml
+
+# Keep training and inference reference conditioning identical: 3.0 seconds
+# of clean target speech followed by the masked 2.4-second generation window.
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_rubberband/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_rubberband/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 250
+keep_interval: 250
+total_step: 1500
+
+# Keep adversarial training disabled for the first controlled R3 comparison.
+# If clean targets still produce robotic output, run a separate ablation that
+# enables the pretrained discriminator after an initial reconstruction warmup.
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    optim_conf:
+      lr: 0.00003
