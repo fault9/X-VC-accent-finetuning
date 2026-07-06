@@ -6,8 +6,8 @@ Deployment converts UNSEEN sources (the experimenter live, participants) into th
 fine-tuned targets, so checkpoints must be chosen from that direction — not from
 self-reconstruction validation loss. For every checkpoint of a run this script:
 
-    1. converts every clip in a FIXED folder of unseen-source wavs into every
-       pinned target reference (offline mode; optionally streaming too),
+    1. converts clips from a FIXED source folder according to an optional,
+       explicit evaluation plan (offline mode; optionally streaming too),
     2. computes per clip: ERes2Net cosine similarity to the target reference,
        Whisper WER against the script text (or an ASR-on-source proxy),
        output-vs-source duration delta, optional CommonAccent confidence,
@@ -31,6 +31,7 @@ Typical use (GPU container):
         --run-dir exp/finetune_arabic \
         --source-dir data/eval_sources \
         --targets-dir data/eval_targets \
+        --evaluation-plan configs/eval_hindi_native_to_accent.json \
         --include-base ckpts/xvc.pt
 
 WER references: put a sidecar ``<clip>.txt`` next to each source wav, or pass
@@ -323,6 +324,94 @@ def load_transcripts(source_dir: Path, transcripts: Optional[str]) -> Dict[str, 
     return table
 
 
+def source_speaker(path: Path) -> str:
+    """Return the corpus speaker prefix from ``speaker_arctic_prompt.wav``."""
+    marker = "_arctic_"
+    if marker not in path.stem:
+        raise ValueError(
+            f"cannot derive source speaker from {path.name!r}; an evaluation "
+            f"plan requires names like speaker_arctic_prompt.wav"
+        )
+    return path.stem.split(marker, 1)[0]
+
+
+def build_evaluation_pairs(sources, targets, plan_path: Optional[str], targets_dir: Path):
+    """Return explicitly assigned ``(source, target)`` pairs.
+
+    Without a plan this retains the historical Cartesian-product behaviour.
+    A plan is deliberately strict: every source speaker must be allow-listed,
+    every source must resolve to exactly one assigned target, and target-group
+    membership is verified against ``targets_meta.json``.
+    """
+    if not plan_path:
+        return [(source, target) for source in sources for target in targets], None
+
+    plan_file = Path(plan_path)
+    plan = json.loads(plan_file.read_text(encoding="utf-8"))
+    if plan.get("source_group") != "native_english":
+        raise SystemExit(
+            "[error] evaluation plan must declare source_group='native_english'"
+        )
+
+    allowed = set(plan.get("allowed_source_speakers") or [])
+    assignments = plan.get("assignments") or {}
+    if not allowed or not assignments:
+        raise SystemExit(
+            "[error] evaluation plan needs allowed_source_speakers and assignments"
+        )
+
+    target_by_name = {target.stem: target for target in targets}
+    target_group = plan.get("target_group")
+    if not target_group:
+        raise SystemExit("[error] evaluation plan needs target_group")
+    meta_path = targets_dir / "targets_meta.json"
+    if not meta_path.is_file():
+        raise SystemExit(
+            f"[error] target-group validation requires {meta_path}"
+        )
+    target_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    pairs = []
+    used_targets = set()
+    for source in sources:
+        try:
+            speaker = source_speaker(source)
+        except ValueError as exc:
+            raise SystemExit(f"[error] {exc}") from exc
+        if speaker not in allowed:
+            raise SystemExit(
+                f"[error] non-native/unapproved source speaker {speaker!r}: "
+                f"{source.name}"
+            )
+        target_name = assignments.get(source.stem, assignments.get(speaker))
+        if not target_name:
+            raise SystemExit(
+                f"[error] no assigned target for source {source.stem!r} "
+                f"(speaker {speaker!r})"
+            )
+        if target_name not in target_by_name:
+            raise SystemExit(
+                f"[error] assigned target {target_name!r} is absent from "
+                f"{targets_dir}"
+            )
+        actual_group = (target_meta.get(target_name) or {}).get("group")
+        if actual_group != target_group:
+            raise SystemExit(
+                f"[error] assigned target {target_name!r} belongs to "
+                f"{actual_group!r}, expected {target_group!r}"
+            )
+        pairs.append((source, target_by_name[target_name]))
+        used_targets.add(target_name)
+
+    declared_targets = set(assignments.values())
+    if used_targets != declared_targets:
+        raise SystemExit(
+            "[error] evaluation plan has unused target assignments: "
+            + ", ".join(sorted(declared_targets - used_targets))
+        )
+    return pairs, plan
+
+
 def cmd_run(args) -> int:
     import numpy as np
     import soundfile as sf
@@ -348,6 +437,11 @@ def cmd_run(args) -> int:
     if args.max_sources:
         sources = sources[: args.max_sources]
 
+    eval_pairs, evaluation_plan = build_evaluation_pairs(
+        sources, targets, args.evaluation_plan, Path(args.targets_dir)
+    )
+    targets = sorted({target for _, target in eval_pairs})
+
     ckpts = list_checkpoints(run_dir, args.steps)
     if args.include_base:
         ckpts.insert(0, {"step": "base", "path": Path(args.include_base)})
@@ -363,6 +457,11 @@ def cmd_run(args) -> int:
                 "source_dir": str(args.source_dir),
                 "sources": {p.stem: sha256_file(p) for p in sources},
                 "targets": {p.stem: sha256_file(p) for p in targets},
+                "evaluation_plan": evaluation_plan,
+                "pairs": [
+                    {"source": source.stem, "target": target.stem}
+                    for source, target in eval_pairs
+                ],
                 "mode": "streaming" if args.streaming else "offline",
             },
             f, indent=2,
@@ -412,8 +511,7 @@ def cmd_run(args) -> int:
             emb, frame_cond = precompute_conditions(model, target_wav, target_wav_cond)
             tgt_cache[t.stem] = (target_wav, target_wav_cond, emb, frame_cond)
 
-        for src in sources:
-            for t in targets:
+        for src, t in eval_pairs:
                 target_wav, target_wav_cond, tgt_emb, frame_cond = tgt_cache[t.stem]
                 source_wav, _, _ = load_pair_as_tensors(
                     str(src), str(t), cfg, device, args.latent_hop_length,
@@ -477,8 +575,10 @@ def cmd_run(args) -> int:
                     "avg_latency_ms": round(latency, 1) if latency is not None else None,
                     "out_path": str(out_path),
                 })
-            print(f"  {src.stem}: {len(targets)} targets done "
-                  f"({time.time() - t0:.1f}s last clip)")
+                print(
+                    f"  {src.stem} -> {t.stem} done "
+                    f"({time.time() - t0:.1f}s)"
+                )
 
         del model, tgt_cache
         if torch.cuda.is_available():
@@ -546,9 +646,15 @@ def main(argv=None) -> int:
     r = sub.add_parser("run", help="evaluate checkpoints: convert, measure, rank")
     r.add_argument("--run-dir", required=True, help="training run dir (exp/finetune_<x>)")
     r.add_argument("--source-dir", required=True,
-                   help="FIXED folder of unseen-source wavs (your script clips)")
+                   help="FIXED folder of source wavs (restricted by evaluation plan)")
     r.add_argument("--targets-dir", required=True,
                    help="pinned target reference wavs (<speaker>.wav), see make-targets")
+    r.add_argument(
+        "--evaluation-plan",
+        help="JSON plan that enforces native source speakers, target accent group, "
+             "and one assigned target per source; without it, legacy Cartesian "
+             "source x target evaluation is used",
+    )
     r.add_argument("--config", default=None, help="default: <run-dir>/config.yaml")
     r.add_argument("--out", default=None, help="default: <run-dir>/eval")
     r.add_argument("--steps", default="all", help="'all' or comma list, e.g. 250,500")
