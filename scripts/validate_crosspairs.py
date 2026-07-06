@@ -351,6 +351,8 @@ def main() -> int:
         "train_prompts": len(prompts["train"]),
         "val_prompts": len(prompts["val"]),
         "prompt_overlap": 0,
+        "source_speakers": align_meta.get("source_speakers"),
+        "target_speakers": align_meta.get("target_speakers"),
         "target_rms_dbfs_min": round(min(rms_values), 2) if rms_values else None,
         "target_rms_dbfs_median": round(float(np.median(rms_values)), 2) if rms_values else None,
         "internal_zero_run_ms_max": round(max(zero_runs_ms), 2) if zero_runs_ms else None,

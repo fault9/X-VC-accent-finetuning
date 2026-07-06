@@ -556,6 +556,10 @@ def source_speaker(row: dict) -> str:
     return Path(row["source_wav_path"]).stem.split("_arctic_", 1)[0]
 
 
+def target_speaker(row: dict) -> str:
+    return row["target_utt"].split("__", 1)[0]
+
+
 def stratified_limit(rows: list[dict], limit: int, seed: int) -> list[dict]:
     """Deterministically round-robin a per-split cap across source speakers."""
     groups: dict[str, list[dict]] = {}
@@ -611,6 +615,14 @@ def main() -> int:
                     help="raw L2 root — align the RAW target (single warp), not the "
                          "build's pre-stretched one (avoids double time-warp artifacts)")
     ap.add_argument("--limit", type=int, default=None, help="cap pairs (debug)")
+    ap.add_argument(
+        "--train-limit", type=int, default=None,
+        help="cap training pairs after filtering, balanced across source speakers",
+    )
+    ap.add_argument(
+        "--val-limit", type=int, default=None,
+        help="cap validation pairs after filtering, balanced across source speakers",
+    )
     ap.add_argument("--min-duration", type=float, default=3.0,
                     help="require both raw recordings to be at least this long")
     ap.add_argument("--min-global-stretch", type=float, default=0.85,
@@ -704,11 +716,18 @@ def main() -> int:
             raise RuntimeError("global prompt re-split failed")
         print(f"[repair] re-split legacy manifests by prompt: "
               f"train={len(splits['train'])}, val={len(splits['val'])}")
-    if args.limit:
-        splits = {
-            name: stratified_limit(rows, args.limit, 1234 + index)
-            for index, (name, rows) in enumerate(splits.items())
-        }
+    split_limits = {
+        "train": args.train_limit if args.train_limit is not None else args.limit,
+        "val": args.val_limit if args.val_limit is not None else args.limit,
+    }
+    for index, name in enumerate(("train", "val")):
+        limit = split_limits[name]
+        if limit is not None:
+            if limit <= 0:
+                ap.error(f"--{name}-limit must be positive")
+            splits[name] = stratified_limit(
+                splits[name], limit, 1234 + index
+            )
 
     if args.warp_method == "rubberband":
         executable = shutil.which("rubberband")
@@ -966,6 +985,13 @@ def main() -> int:
             split: {
                 speaker: sum(source_speaker(row) == speaker for row in rows)
                 for speaker in sorted({source_speaker(row) for row in rows})
+            }
+            for split, rows in rows_out.items()
+        },
+        "target_speakers": {
+            split: {
+                speaker: sum(target_speaker(row) == speaker for row in rows)
+                for speaker in sorted({target_speaker(row) for row in rows})
             }
             for split, rows in rows_out.items()
         },
