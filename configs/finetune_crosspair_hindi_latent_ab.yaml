@@ -25,8 +25,10 @@ current_step: 0
 current_epoch: 0
 log_interval: 10
 val_interval: 50
-save_interval: 250
-keep_interval: 250
+# Preserve the learning curve: batch 8 gives eight times the exposure of the
+# original batch-1 pilot, so the best accent/quality tradeoff may occur early.
+save_interval: 50
+keep_interval: 50
 total_step: 250
 
 generator_warmup_steps: 100000
