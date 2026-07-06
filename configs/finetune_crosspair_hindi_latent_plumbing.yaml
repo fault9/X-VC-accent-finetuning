@@ -1,0 +1,38 @@
+# Two-step end-to-end plumbing check for latent alignment. Run this before the
+# 250-step A/B to catch real encoder, tensor-length, decoder, or loss failures.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_ab/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_ab/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true
+  static:
+    batch_size: 1
+
+current_step: 0
+current_epoch: 0
+log_interval: 1
+val_interval: 1
+save_interval: 2
+keep_interval: 2
+total_step: 2
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    optim_conf:
+      lr: 0.00003
