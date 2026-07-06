@@ -1,7 +1,5 @@
 #!/bin/bash
-# Fine-tune X-VC on one speaker group (arabic / spanish / chinese / hindi / native / joint),
-# "Option A": warm-start the released checkpoint, freeze everything except
-# acoustic_converter + prenet, self-reconstruction objective.
+# Fine-tune X-VC on a configured self-reconstruction or cross-pair dataset.
 #
 # Warm-starts from the released X-VC checkpoint with a FRESH optimizer
 # (--checkpoint loads weights only; --resume_step 0 means no optimizer/step restore).
@@ -148,6 +146,18 @@ echo "seed        : $seed"
 echo "lr override : ${lr:-<config default>}"
 echo "resume_step : $resume_step"
 echo "checkpoint  : ${checkpoint_arg:-<resume from $log_dir/ckpt>}"
+
+# Cross-pair runs are unsafe unless prompt splits, paths, sample formats and
+# aligned lengths pass the hard preflight. Run this before GPU startup.
+crosspair_root="data/${accent}"
+if [[ "$accent" == crosspair_* ]]; then
+  if [[ ! -f "$crosspair_root/manifests/train.jsonl" || \
+        ! -f "$crosspair_root/manifests/val.jsonl" ]]; then
+    echo "Cross-pair manifests missing under $crosspair_root" >&2
+    exit 1
+  fi
+  python scripts/validate_crosspairs.py --data-root "$crosspair_root"
+fi
 
 # Reproducibility record — BEFORE training starts, so even a crashed run is traceable.
 python scripts/write_run_meta.py \
