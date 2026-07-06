@@ -130,7 +130,10 @@ def main() -> int:
     ap.add_argument("--l2-root", default=DEFAULT_L2_ROOT)
     ap.add_argument("--per-source", type=int, default=500,
                     help="prompts per source speaker (deterministic shuffle, seed 1234)")
-    ap.add_argument("--val-per-pair", type=int, default=20)
+    ap.add_argument("--val-prompts", "--val-per-pair", dest="val_prompts",
+                    type=int, default=20,
+                    help="number of ARCTIC prompt IDs held out globally; the "
+                         "legacy --val-per-pair spelling is accepted")
     ap.add_argument("--alpha-range", default="0.6,1.7",
                     help="skip pairs whose stretch factor falls outside this range")
     args = ap.parse_args()
@@ -139,7 +142,11 @@ def main() -> int:
     lo_a, hi_a = (float(v) for v in args.alpha_range.split(","))
     rng = random.Random(1234)
 
-    train_rows, val_rows = [], []
+    # Build every pair first, then split *prompt groups* globally.  Splitting
+    # inside each source/target pair leaks the same ARCTIC sentence across
+    # train and validation (for example BDL/a0123 in val and RMS/a0123 in
+    # train), which makes the validation loss optimistic.
+    all_rows = []
     stats = {"pairs": {}, "skipped_alpha": 0, "alphas": []}
 
     for pair in args.pair:
@@ -183,11 +190,27 @@ def main() -> int:
                 "target_utt": f"{tgt_spk}__{src_spk}_{stem}_ft",
                 "target_wav_path": str(tgt_out).replace("\\", "/"),
             })
-        val_rows.extend(rows[: args.val_per_pair])
-        train_rows.extend(rows[args.val_per_pair:])
+        for row in rows:
+            row["_prompt_id"] = Path(row["source_wav_path"]).stem.split("_", 1)[1]
+            all_rows.append(row)
         stats["pairs"][pair] = len(rows)
         print(f"{pair}: {len(rows)} pairs "
               f"(alpha mean {np.mean([a for a in stats['alphas']][-len(rows):]):.3f})")
+
+    prompt_ids = sorted({r["_prompt_id"] for r in all_rows})
+    split_rng = random.Random(1234)
+    split_rng.shuffle(prompt_ids)
+    val_prompt_ids = set(prompt_ids[: args.val_prompts])
+    val_rows = [r for r in all_rows if r["_prompt_id"] in val_prompt_ids]
+    train_rows = [r for r in all_rows if r["_prompt_id"] not in val_prompt_ids]
+    for row in all_rows:
+        row.pop("_prompt_id", None)
+
+    train_prompts = {Path(r["source_wav_path"]).stem.split("_", 1)[1] for r in train_rows}
+    val_prompts = {Path(r["source_wav_path"]).stem.split("_", 1)[1] for r in val_rows}
+    overlap = train_prompts & val_prompts
+    if overlap:
+        raise RuntimeError(f"prompt leakage after split: {sorted(overlap)[:5]}")
 
     mdir = out / "manifests"
     mdir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +224,8 @@ def main() -> int:
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "pairs": stats["pairs"],
         "train": len(train_rows), "val": len(val_rows),
+        "train_prompts": len(train_prompts), "val_prompts": len(val_prompts),
+        "prompt_overlap": 0,
         "skipped_alpha": stats["skipped_alpha"],
         "alpha": {"mean": round(float(alphas.mean()), 3),
                   "p5": round(float(np.percentile(alphas, 5)), 3),
