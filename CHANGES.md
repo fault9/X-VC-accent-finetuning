@@ -1,76 +1,403 @@
-# X-VC accent fine-tuning changes
+# X-VC accent fine-tuning changes and procedure
 
 This fork tracks the PersonaPlex/X-VC accent-conversion work on top of upstream
-X-VC (MIT License; https://github.com/Jerrister/X-VC).
+X-VC (MIT License; https://github.com/Jerrister/X-VC). This file is intentionally
+procedural: it documents what was tried, why the approach changed, and how to
+reproduce the current fine-tuning/evaluation path.
 
-## 2026-07-07 current path: latent-aligned native -> Hindi pilot
+## 2026-07-07 active procedure: latent-aligned native -> Hindi conversion
 
-The older self-reconstruction fine-tunes improved rendering for already-accented
-sources, but they did **not** make native input acquire a target accent. The current
-experiment therefore uses cross-paired ARCTIC prompts:
+### Research requirement
+
+The PersonaPlex experiment needs live/free native-English participant speech to
+come out with an assigned non-native accent. In X-VC terms, this is the hard
+direction:
 
 ```text
-native ARCTIC source (bdl/clb/rms/slt)
-  -> X-VC fine-tune target
-Hindi L2-ARCTIC target (ASI/TNI)
+native/free source speech + accented target reference -> converted speech with target accent
 ```
 
-The main active dataset/config is:
+Stock X-VC and self-reconstruction fine-tunes preserve the source pronunciation:
+native input remains native-sounding even when the target reference speaker is
+accented. The working hypothesis is therefore that X-VC must see explicit
+native-source -> accented-target pairs during training.
 
-- data root: `data/crosspair_hindi_latent_200`
-- config: `configs/finetune_crosspair_hindi_latent_200.yaml`
-- train/val: 199 train pairs + 40 validation pairs
-- speakers: native `bdl/clb/rms/slt` -> Hindi `ASI/TNI`
-- prompt split: disjoint train/val prompt IDs
-- checkpoint start: released `ckpts/xvc.pt`
-- training default: batch 8, learning rate `3e-5`, 500 steps, save every 50 steps
+### Upstream setup followed
 
-### Why latent alignment replaced waveform warping
+We follow the upstream X-VC training structure where possible:
 
-The first cross-pair attempts aligned recordings by waveform time-warping
-(`sourcewarp` / DTW + rubberband). They produced an audible accent signal, but also
-introduced metallic/flanger/robotic artifacts and degraded intelligibility. The
-current branch keeps the audio files natural and applies the DTW map inside training
-instead:
+- clone X-VC code;
+- install the X-VC Python environment;
+- prepare the released X-VC checkpoint as the warm start;
+- prepare required pretrained modules:
+  - GLM-4-Voice tokenizer from Hugging Face;
+  - ERes2Net speaker encoder from ModelScope;
+  - released X-VC checkpoint at `ckpts/xvc.pt`;
+- point config files at JSONL train/val manifests;
+- train via `scripts/finetune.sh` / X-VC DeepSpeed training.
 
-- post-adapter WhisperVQ/semantic features are linearly aligned to the accented target
-  timeline;
-- SAC/acoustic discrete features are aligned with nearest-neighbour sampling;
-- inference remains unchanged.
+The upstream README describes general training, but it does not specify a
+small-data accent-conversion fine-tuning recipe. The freeze policy, cross-pair
+manifests, latent alignment, and evaluation gates below are project-specific.
 
-This keeps the training objective frame-compatible without baking time-warp artifacts
-into the waveform targets.
+### Attempt 1: accent self-reconstruction
 
-### What validated so far
+Initial runs used accented utterances as both source and target:
 
-Small pilots showed the native -> Hindi accent signal can appear without the severe
-quality collapse of waveform-warp training:
+```text
+source_wav_path == target_wav_path
+```
 
-- stock X-VC: near-zero Indian-class detections on native-source conversions;
-- 20-pair latent pilot: increased Indian-class detections with much lower WER damage
-  than the source-warp pilot;
-- `3e-5` was a better pilot setting than `1e-5` for accent signal/quality balance.
+Only the middle conversion modules were trainable:
 
-The next gate is the `crosspair_hindi_latent_200` run. Evaluate stock vs fine-tuned
-checkpoints only in the intended study direction: unseen native-English sources into
-assigned Hindi target references, with real accented recordings used only as positive
-reference controls.
+- trainable: `acoustic_converter`, `prenet`;
+- frozen: content/semantic encoder, acoustic codec encoder/quantizer, speaker
+  encoder, decoders, vocoder path, and most released X-VC weights.
 
-### Required pretrained assets after a container reset
+This sometimes improved rendering quality for already-accented inputs, but it did
+not teach native input to acquire the target accent. Conclusion: self-reconstruction
+is not enough for the live native-speaker use case.
 
-The GitHub clone is only code. A fresh container also needs:
+### Attempt 2: waveform-aligned native -> accented cross-pairs
 
-- `ckpts/xvc.pt` from the released X-VC checkpoint;
-- `pretrained/speech_eres2net_sv_en_voxceleb_16k/` from ModelScope;
-- cached `zai-org/glm-4-voice-tokenizer` from Hugging Face.
+Next, we built cross-pairs by matching shared ARCTIC prompt IDs:
 
-Known dependency pin after installing ModelScope:
+```text
+native CMU ARCTIC source (bdl/clb/rms/slt)
+  -> matching Hindi L2-ARCTIC target (ASI/TNI)
+```
+
+Naive frame losses are unsafe because the recordings have different timings. We
+therefore tried DTW-based waveform alignment:
+
+- sentence-level stretch;
+- DTW + overlap-add/source-warp variants;
+- Rubber Band / source-warp variants.
+
+These runs produced an audible Hindi-accent signal, which was the first evidence
+that cross-pair training could work. However, the converted audio often became
+metallic/flangery/robotic, and intelligibility degraded. Listening suggested that
+the model learned artifacts from the warped waveform targets. Conclusion:
+cross-pair training is promising, but waveform warping is the wrong target audio.
+
+### Current fix: latent alignment, not waveform warping
+
+The current branch keeps all source/target waveforms natural and applies the DTW
+mapping inside training only. In other words, the audio files on disk are not
+time-warped.
+
+Implementation idea:
+
+- compute DTW anchors between same-prompt native/L2 recordings;
+- keep the source and target WAVs pristine;
+- during training, align frozen native content/acoustic features to the accented
+  target timeline:
+  - post-adapter WhisperVQ/semantic features are linearly sampled;
+  - SAC/acoustic discrete features are nearest-neighbour sampled;
+- inference remains normal X-VC inference.
+
+This preserves the frame-compatible training objective without baking metallic
+time-warp artifacts into the target waveform.
+
+## Current Hindi datasets
+
+All current active pilots use Hindi L2-ARCTIC:
+
+- male target speaker: `ASI`;
+- female target speaker: `TNI`;
+- native source speakers: `bdl`, `clb`, `rms`, `slt`;
+- train/val split is by ARCTIC prompt ID, with no train/val prompt overlap;
+- only utterances at least 3 seconds are kept;
+- global duration ratio filter: target/source must be between `0.85` and `1.20`;
+- target reference clips are separate reference utterances, not the paired target
+  utterance itself.
+
+### `crosspair_hindi_latent_200`
+
+- data root: `data/crosspair_hindi_latent_200`;
+- config: `configs/finetune_crosspair_hindi_latent_200.yaml`;
+- train pairs: 199;
+- validation pairs: 40;
+- train prompts: 162;
+- validation prompts: 30;
+- source speakers: `bdl=50`, `clb=49`, `rms=50`, `slt=50`;
+- target speakers: `ASI=100`, `TNI=99`;
+- validation prompt overlap: `0`.
+
+Training config:
+
+- warm start: `ckpts/xvc.pt`;
+- trainable modules: `acoustic_converter`, `prenet`;
+- learning rate: `3e-5`;
+- batch size: `8`;
+- reconstruction ratio: `0.0`;
+- reversed ratio: `0.0`;
+- latent alignment: enabled;
+- EMA update: disabled;
+- adversarial/discriminator warmup effectively disabled for this short pilot
+  (`generator_warmup_steps: 100000`);
+- total steps: `500`;
+- save/validation interval: `50`.
+
+### `crosspair_hindi_latent_400`
+
+- data root: `data/crosspair_hindi_latent_400`;
+- config: `configs/finetune_crosspair_hindi_latent_400.yaml`;
+- train pairs: 398;
+- validation pairs: 40;
+- train prompts: 290;
+- validation prompts: 30;
+- source speakers: `bdl=100`, `clb=98`, `rms=100`, `slt=100`;
+- target speakers: `ASI=200`, `TNI=198`;
+- validation prompt overlap: `0`;
+- validator result: `failures: 0`.
+
+Training config is the same as `latent_200` except:
+
+- total steps: `1000`;
+- save/validation interval: `100`.
+
+`400` means approximately 400 training pairs, not 400 steps. We train to 1000
+only to observe the checkpoint curve; based on `latent_200`, the likely usable
+region is still expected to be early.
+
+## Local dataset build procedure
+
+The full seed cross-pair manifests live in the older local clone:
+
+```text
+C:\Users\felix\Scripts\X-VC-accent-finetuning\data\crosspair_hindi
+```
+
+The active code lives in:
+
+```text
+C:\Users\felix\Scripts\kth-project\X-VC-latent-alignment
+```
+
+Build `latent_400` from WSL:
+
+```bash
+cd /mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment
+source ~/xvc-align/bin/activate
+
+seed=/mnt/c/Users/felix/Scripts/X-VC-accent-finetuning
+repo=/mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment
+
+python scripts/align_crosspairs.py \
+  --train-manifest "$seed/data/crosspair_hindi/manifests/train.jsonl" \
+  --val-manifest "$seed/data/crosspair_hindi/manifests/val.jsonl" \
+  --resplit-val-prompts 40 \
+  --warp-method latent \
+  --anchor-hop-frames 20 \
+  --min-duration 3 \
+  --min-global-stretch 0.85 \
+  --max-global-stretch 1.20 \
+  --train-limit 400 \
+  --val-limit 40 \
+  --source-root "$seed" \
+  --l2-root /mnt/d/datasets/arctic-audio/l2arctic \
+  --prompts-file /mnt/d/l2arctic_release_v5.0/PROMPTS \
+  --out "$repo/data/crosspair_hindi_latent_400"
+```
+
+Validate and pack:
+
+```bash
+cd /mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment
+source ~/xvc-align/bin/activate
+
+python scripts/validate_crosspairs.py \
+  --data-root data/crosspair_hindi_latent_400
+
+tar -czf data/crosspair_hindi_latent_400.tgz \
+  -C data crosspair_hindi_latent_400
+
+sha256sum data/crosspair_hindi_latent_400.tgz
+ls -lh data/crosspair_hindi_latent_400.tgz
+```
+
+Upload the tarball to Jupyter at:
+
+```text
+~/X-VC/data/crosspair_hindi_latent_400.tgz
+```
+
+## Jupyter/container setup after reset
+
+The GitHub clone is only code. A fresh container also needs model assets:
+
+- `ckpts/xvc.pt`;
+- `pretrained/speech_eres2net_sv_en_voxceleb_16k/`;
+- cached `zai-org/glm-4-voice-tokenizer`.
+
+Known dependency pin after ModelScope installation:
 
 ```bash
 python -m pip install 'huggingface_hub>=0.23.2,<1.0' \
   'fsspec[http]<2025.0,>=2022.5.0' \
   'packaging<25.0,>=20.0'
 ```
+
+Pull active branch/configs:
+
+```bash
+cd ~/X-VC
+git remote add fork https://github.com/fault9/X-VC-accent-finetuning.git 2>/dev/null || true
+git fetch fork latent-alignment
+git switch latent-alignment 2>/dev/null || git switch -c latent-alignment --track fork/latent-alignment
+git pull --ff-only fork latent-alignment
+```
+
+Extract uploaded dataset and rewrite absolute local paths to container paths:
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+tar -xzf data/crosspair_hindi_latent_400.tgz -C data
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+root = Path("/home/jovyan/X-VC/data/crosspair_hindi_latent_400").resolve()
+old_prefixes = [
+    "/mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment/data/crosspair_hindi_latent_400",
+    "/mnt/c/Users/felix/Scripts/X-VC-accent-finetuning/data/crosspair_hindi_latent_400",
+]
+
+for mf in [root/"manifests/train.jsonl", root/"manifests/val.jsonl"]:
+    rows = []
+    for line in mf.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        for k, v in list(row.items()):
+            if isinstance(v, str):
+                for old in old_prefixes:
+                    if v.startswith(old):
+                        row[k] = str(root) + v[len(old):]
+        rows.append(json.dumps(row, ensure_ascii=False))
+    mf.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    print("rewrote", mf)
+PY
+
+python scripts/validate_crosspairs.py \
+  --data-root data/crosspair_hindi_latent_400
+```
+
+## Training commands
+
+`latent_200`:
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+bash scripts/finetune.sh \
+  --accent crosspair_hindi_latent_200 \
+  --num_workers 0 2>&1 | tee latent_200_lr3e-5.log
+```
+
+`latent_400`:
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+bash scripts/finetune.sh \
+  --accent crosspair_hindi_latent_400 \
+  --num_workers 0 2>&1 | tee latent_400_lr3e-5.log
+```
+
+## Evaluation protocol
+
+Evaluate only in the intended study direction:
+
+```text
+held-out native-English source -> assigned Hindi target reference
+```
+
+Do not evaluate other accent-source directions as the main gate, because study
+participants are expected to be native English speakers. Real accented recordings
+are used only as positive-reference controls, not as sources for the main comparison.
+
+Current evaluation plan:
+
+- config: `configs/eval_hindi_native_to_accent.json`;
+- approved native eval sources: `clb`, `rms`;
+- assignments:
+  - `clb -> TNI`;
+  - `rms -> ASI`;
+- compare stock X-VC (`ckpts/xvc.pt`) against fine-tuned checkpoints;
+- metrics:
+  - speaker similarity;
+  - Whisper ASR/WER proxy against source transcription;
+  - UTMOS/SpeechMOS proxy;
+  - CommonAccent-style accent classifier, especially `indian` detections;
+- listening remains required, because MOS/accent classifiers are proxies.
+
+For quick checkpoint sweeps, sources are short held-out native utterances. Target
+references should be longer, clean accented references (approximately 15 seconds
+where possible) because target-reference duration stabilizes speaker/accent
+conditioning.
+
+Evaluate `latent_400` early checkpoints:
+
+```bash
+python scripts/eval_checkpoints.py run \
+  --run-dir exp/finetune_crosspair_hindi_latent_400 \
+  --source-dir data/eval_sources \
+  --targets-dir data/eval_targets \
+  --evaluation-plan configs/eval_hindi_native_to_accent.json \
+  --steps 100,200,300,400 \
+  --include-base ckpts/xvc.pt \
+  --mos \
+  --accent-clf \
+  --out exp/finetune_crosspair_hindi_latent_400/eval_compare_early
+```
+
+Evaluate full `latent_400` curve:
+
+```bash
+python scripts/eval_checkpoints.py run \
+  --run-dir exp/finetune_crosspair_hindi_latent_400 \
+  --source-dir data/eval_sources \
+  --targets-dir data/eval_targets \
+  --evaluation-plan configs/eval_hindi_native_to_accent.json \
+  --steps 100,200,300,400,600,800,1000 \
+  --include-base ckpts/xvc.pt \
+  --mos \
+  --accent-clf \
+  --out exp/finetune_crosspair_hindi_latent_400/eval_compare
+```
+
+## Results so far
+
+`latent_200` full intermediate sweep:
+
+| Checkpoint | Similarity | WER proxy | MOS proxy | Indian-class count |
+|---|---:|---:|---:|---:|
+| stock/base | 0.6380 | 0.0000 | 3.6943 | 1/10 |
+| 50 | 0.6511 | 0.0303 | 2.4882 | 3/10 |
+| 100 | 0.6603 | 0.0220 | 2.4928 | 8/10 |
+| 150 | 0.6659 | 0.0671 | 2.4325 | 6/10 |
+| 200 | 0.6740 | 0.0771 | 2.3722 | 9/10 |
+| 300 | 0.6526 | 0.0971 | 2.3168 | 10/10 |
+| 350 | 0.6338 | 0.0771 | 2.2985 | 9/10 |
+| 400 | 0.6312 | 0.0945 | 1.9196 | 9/10 |
+| 450 | 0.6280 | 0.1230 | 2.0710 | 10/10 |
+
+Interpretation:
+
+- the fine-tune can make native input register as Hindi/Indian-accented;
+- the accent signal appears early, around 100-300 steps;
+- longer training increases accent strength but hurts MOS/intelligibility;
+- checkpoint 100 is the metric-first candidate;
+- checkpoint 200/300 are stronger-accent alternatives that require listening;
+- training to thousands of steps is not justified on `latent_200`.
+
+The purpose of `latent_400` is to test whether more paired data gives the same
+accent signal with less MOS/WER degradation.
 
 ---
 
