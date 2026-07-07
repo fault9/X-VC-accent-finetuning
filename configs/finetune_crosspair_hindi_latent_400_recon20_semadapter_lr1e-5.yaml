@@ -1,0 +1,48 @@
+# Content-pathway latent-alignment pilot.
+#
+# Same data/objective as the recon20 MOS-repair run, but also trains
+# semantic_adapter at a lower LR.  Hypothesis: accent/pronunciation edits need
+# some content-pathway capacity; otherwise acoustic_converter + prenet may force
+# accent through acoustics and damage naturalness.
+#
+# Conservative first setting:
+#   * 80% native -> Hindi latent-aligned cross-pairs
+#   * 20% target -> target reconstruction samples using identity latent alignment
+#   * trainable: acoustic_converter + prenet + semantic_adapter
+#   * lr: 1e-5
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet, semantic_adapter]
+    optim_conf:
+      lr: 0.00001
