@@ -161,6 +161,41 @@ Training config is the same as `latent_200` except:
 only to observe the checkpoint curve; based on `latent_200`, the likely usable
 region is still expected to be early.
 
+### `crosspair_hindi_latent_400_recon20_lr2e-5`
+
+This is the first explicit MOS/naturalness repair run.
+
+Motivation from `latent_400`:
+
+- native -> Hindi accent transfer works;
+- accent strength increases with training;
+- MOS/naturalness and WER drift still degrade as the model moves away from the
+  released X-VC behavior.
+
+Fix tested here:
+
+- keep the same `crosspair_hindi_latent_400` data;
+- keep trainable modules limited to `acoustic_converter` and `prenet`;
+- lower the learning rate from `3e-5` to `2e-5`;
+- set `reconstruction_ratio: 0.2`;
+- keep `reversed_ratio: 0.0`;
+- train to 1000 steps, save every 100.
+
+In latent-alignment mode, reconstruction samples are handled specially: when the
+dataloader chooses reconstruction, the source becomes the target waveform and the
+latent map becomes an identity map. This matters because reusing the original
+native->L2 DTW map for target->target reconstruction would distort the clean
+anchor and weaken the MOS repair.
+
+Hypothesis:
+
+```text
+80% native -> Hindi accent pressure
+20% target -> target clean reconstruction anchor
+```
+
+should preserve more of stock X-VC's naturalness while retaining the accent signal.
+
 ## Local dataset build procedure
 
 The full seed cross-pair manifests live in the older local clone:
@@ -309,6 +344,19 @@ bash scripts/finetune.sh \
   --num_workers 0 2>&1 | tee latent_400_lr3e-5.log
 ```
 
+`latent_400` with reconstruction anchor and lower LR:
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+bash scripts/finetune.sh \
+  --accent crosspair_hindi_latent_400 \
+  --config configs/finetune_crosspair_hindi_latent_400_recon20_lr2e-5.yaml \
+  --log_dir exp/finetune_crosspair_hindi_latent_400_recon20_lr2e-5 \
+  --num_workers 0 2>&1 | tee latent_400_recon20_lr2e-5.log
+```
+
 ## Evaluation protocol
 
 Evaluate only in the intended study direction:
@@ -371,6 +419,21 @@ python scripts/eval_checkpoints.py run \
   --out exp/finetune_crosspair_hindi_latent_400/eval_compare
 ```
 
+Evaluate the reconstruction-anchor run:
+
+```bash
+python scripts/eval_checkpoints.py run \
+  --run-dir exp/finetune_crosspair_hindi_latent_400_recon20_lr2e-5 \
+  --source-dir data/eval_sources \
+  --targets-dir data/eval_targets \
+  --evaluation-plan configs/eval_hindi_native_to_accent.json \
+  --steps 100,200,300,400,600,800,1000 \
+  --include-base ckpts/xvc.pt \
+  --mos \
+  --accent-clf \
+  --out exp/finetune_crosspair_hindi_latent_400_recon20_lr2e-5/eval_compare
+```
+
 ## Results so far
 
 `latent_200` full intermediate sweep:
@@ -398,6 +461,19 @@ Interpretation:
 
 The purpose of `latent_400` is to test whether more paired data gives the same
 accent signal with less MOS/WER degradation.
+
+`latent_400` result summary:
+
+- extra data improved stability somewhat compared with `latent_200`;
+- step 200 was the best metric-balance candidate;
+- step 600 gave stronger accent but higher intelligibility cost;
+- the main remaining issue is MOS/naturalness, not whether accent transfer is
+  possible.
+
+Next run:
+
+- `configs/finetune_crosspair_hindi_latent_400_recon20_lr2e-5.yaml`;
+- goal: recover MOS/naturalness via a 20% reconstruction anchor and lower LR.
 
 ---
 

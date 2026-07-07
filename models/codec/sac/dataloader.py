@@ -147,9 +147,18 @@ class VCSSLWAVDataset(BaseDataset):
             offline = bool(cfg["offline_feature_extracted"])
             ssl_ratio = int(cfg["ssl_per_sem_ratio"])
             feat, ssl_feat, sim_feat = None, None, None
+            # Latent-aligned cross-pairs use a precomputed native->L2 DTW map.
+            # For reconstruction-anchor samples, however, source_wav_path has
+            # already been changed to the target waveform above.  Reusing the
+            # native->L2 map would warp target->target features and defeat the
+            # purpose of the clean reconstruction anchor, so those samples get
+            # an identity map after the target timeline length is known.
+            latent_identity_alignment = (
+                self.latent_alignment and role_assignment_mode == "reconstruction"
+            )
             alignment_positions = (
                 np.load(latent_alignment_path, allow_pickle=False).astype(np.float32)
-                if self.latent_alignment else None
+                if self.latent_alignment and not latent_identity_alignment else None
             )
 
             source_wav = load_audio(source_wav_path, sr, volume_normalize=True, length=None)
@@ -200,6 +209,13 @@ class VCSSLWAVDataset(BaseDataset):
             
             length = T // align_k * align_k
             wav_length = length * hop
+            if latent_identity_alignment:
+                alignment_positions = np.linspace(
+                    0.0,
+                    1.0,
+                    max(int(length * ssl_ratio), 1),
+                    dtype=np.float32,
+                )
             if not self.latent_alignment:
                 source_wav = source_wav[:wav_length]
             target_wav = target_wav[:wav_length]
