@@ -697,6 +697,221 @@ Overnight LR sweep:
 - goal: bracket the `lr1e-5` semantic-adapter run to see whether roboticness is
   better solved by gentler adaptation or stronger/faster accent learning.
 
+## LoRA accent adapters (parameter-efficient fallback)
+
+This is a fallback path to compare against full/whitelist-module fine-tuning. It
+lives entirely on branch `lora-accent-adapters` (do not develop it on
+`latent-alignment`). Nothing here changes the behaviour of the existing non-LoRA
+configs: a config with no `lora` block trains exactly as before.
+
+### Recommendation: which LoRA target set
+
+The question is *which modules host the adapters*. The five options considered:
+
+| # | Target set | Verdict |
+|---|---|---|
+| 1 | `acoustic_converter` attention + FFN | **Recommended first.** Highest-leverage, lowest MOS risk. This is the pilot. |
+| 2 | `acoustic_converter` + `prenet` | Recommended escalation if (1) under-moves the accent. |
+| 3 | + `semantic_adapter` | Ablation only -- closest to content, most likely to hurt WER. |
+| 4 | frozen base + one adapter per condition | Deployment shape -- start per-accent; split by gender only if eval shows cross-gender degradation. |
+| 5 | LoRA + latent alignment + recon anchor | The **objective/data recipe**, orthogonal to 1-4 -- use it regardless. |
+
+Why `acoustic_converter` first. Accent is a content/pronunciation transform. In
+X-VC the source content path is `semantic_encoder (frozen) -> semantic_adapter ->
+(concat acoustic) -> prenet -> acoustic_converter -> decoders`. The
+`acoustic_converter` is the DiT where token-mixing (attention) and channel-mixing
+(FFN) happen under the frame/speaker conditioning; it is where the released
+full-FT recipe already does most of its accent work. LoRA on its attention + FFN
+linears (**Option 1**) is therefore the smallest, most naturalness-preserving
+place to inject accent, with the released weights kept as the anchor.
+
+`prenet` (Option 2) fuses the semantic+acoustic embeddings into the converter
+input -- the natural second target if converter-only capacity is insufficient.
+`semantic_adapter` (Option 3) sits directly on the frozen content encoder; it is
+the most "pronunciation-side" module but also the most likely to distort phonetic
+content, so keep it as an ablation, not a default (it is the same module the
+`recon20_semadapter` full-FT run probes). Do **not** adapt the frozen semantic
+encoder, acoustic codec, speaker encoder, or decoders -- those define the fixed
+coordinate systems the adapter learns against, and 20 min of data cannot improve
+them.
+
+Option 5 is not an alternative to 1-3; it is the training setup. Latent alignment
+is what makes the cross-pair frame losses coherent, and the 20% reconstruction
+anchor is the MOS repair. The **recommended configuration is Option 1's target set
+trained under Option 5's objective** -- exactly what the pilot config does.
+
+Option 4 is the serving structure: one frozen base plus small swappable adapters,
+so we never maintain many full checkpoints. **Start with one adapter per accent**
+(both target voices of an accent share it): in X-VC the voice -- and thus gender --
+is supplied by the reference clip at inference, not learned into the weights (the
+same reason the roster notes give for "no gender split"). **Split an accent into
+per-gender adapters only if eval shows cross-gender degradation** -- e.g. the
+shared adapter helps the male target but hurts the female. A merged adapter is
+~a few MB; the base is shared.
+
+### What the implementation adds
+
+Minimal, auditable, `peft`-free (the training stack already freezes a backbone and
+optimises only `requires_grad` params):
+
+- `models/codec/sac/modules/lora.py` -- `LoRALinear` subclasses `nn.Linear`, so the
+  base `weight`/`bias` keep their ORIGINAL names (a stock checkpoint loads with no
+  key remap); `lora_B` is zero-initialised, so a fresh adapter is the identity map
+  (warm-start reproduces stock output until training moves it). Plus inject /
+  freeze / merge helpers. If `lora.enabled` but the filters match **zero** linears,
+  injection raises `RuntimeError` rather than training an empty adapter set.
+- `utils/train_utils.py` -- `maybe_inject_lora()` (called inside `init_models`,
+  before any checkpoint load) swaps the targeted linears; `freeze_model_parameters`
+  gains a LoRA branch that freezes the base and trains only adapter tensors. The
+  exact adapted layer list and trainable-parameter count are printed at startup
+  (`[lora] ...`), and `verify_trainable_modules` still asserts the trainable set.
+- `utils/checkpoint.py` -- the strict warm-start gate excludes `lora_A`/`lora_B`
+  from "missing trainable-module tensors" (they are fresh by design).
+- `models/codec/sac/model.py` -- `load_from_checkpoint` re-injects the adapter
+  topology before loading, so eval/inference load LoRA checkpoints by exact key
+  match. A stock checkpoint under a LoRA config loads with zero-adapter (= stock),
+  giving a clean base-vs-adapter comparison on one config.
+- `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml` -- the pilot;
+  `..._lora_acoustic_r16.yaml` -- the first capacity escalation (r=16, alpha=32,
+  same acoustic_converter-only target set).
+- `scripts/merge_lora.py` -- folds adapters into the base and exports a
+  stock-architecture checkpoint for zero-overhead serving.
+
+Config flag shape (under `model.generator`):
+
+```yaml
+trainable_modules: [acoustic_converter]   # LoRA-host module(s); base frozen
+lora:
+  enabled: true
+  r: 8
+  alpha: 16            # scaling = alpha / r
+  dropout: 0.0
+  target_modules: [acoustic_converter]     # defaults to trainable_modules
+  include: ["attn.", "ff_x.ff", "ff_c.ff"] # substring filter on Linear names
+  # train_bias: none  # none | lora_only | all
+```
+
+For the pilot this adapts **69 Linear layers** (47 attention + 22 FFN across the
+6 converter blocks) and skips the AdaLN speaker-condition modulation and the
+input/output dim adapters. `trainable_modules` must list the LoRA-host submodules
+so the freeze verifier and warm-start gate see the expected set.
+
+Learning rate. LoRA runs at ~5x the full-FT LR (`2e-5`): far fewer parameters, and
+zero-init `B` damps the earliest updates, so the low-rank delta needs a larger step
+to move within 1000 steps. Start at `1e-4`; raise toward `2e-4` if no Indian-accent
+signal appears by ~step 300.
+
+### Train the LoRA pilot (container)
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+bash scripts/finetune.sh \
+  --accent crosspair_hindi_latent_400 \
+  --config configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml \
+  --log_dir exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r8 \
+  --num_workers 0 2>&1 | tee latent_400_lora_acoustic_r8.log
+```
+
+The `crosspair_*`-style accent name still triggers the cross-pair preflight on
+`data/crosspair_hindi_latent_400`, and `--resume_step 0` warm-starts from
+`ckpts/xvc.pt`. Swap in `..._lora_acoustic_r16.yaml` (with a matching `--log_dir`)
+for the r16 capacity point.
+
+**Startup sanity checklist** -- before letting a run proceed, confirm in the log:
+
+- `[lora]` reports an **adapted layer count > 0** (69 for the pilot); a zero count
+  now hard-fails, but still confirm the number matches expectation;
+- the trainable-parameter total is **far below the full fine-tune** -- LoRA r8 is
+  <1M params vs tens of M for `acoustic_converter + prenet` full-FT;
+- the freeze verifier logs **`trainable submodules == ['acoustic_converter']`**
+  (`[freeze] 'generator' verified: ...`), not `[acoustic_converter, prenet]`.
+
+### Evaluate against stock and the full fine-tune
+
+Same harness and study direction as the latent runs (held-out native source ->
+assigned Hindi reference). One command sweeps the LoRA checkpoints and the stock
+baseline (stock loads with zero-adapter under the LoRA config, so it is exactly
+the released model):
+
+```bash
+python scripts/eval_checkpoints.py run \
+  --run-dir exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r8 \
+  --source-dir data/eval_sources \
+  --targets-dir data/eval_targets \
+  --evaluation-plan configs/eval_hindi_native_to_accent.json \
+  --steps 100,200,300,400,600,800,1000 \
+  --include-base ckpts/xvc.pt \
+  --mos --accent-clf \
+  --out exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r8/eval_compare
+```
+
+To compare against full/whitelist-module fine-tuning, run the existing
+`latent_400` and `latent_400_recon20_lr2e-5` evals and place the `eval_compare`
+CSVs side by side: **stock base vs full-FT recon20 vs LoRA r8 (vs r16)**.
+
+Adapter/checkpoint selection -- pick the earliest step that:
+
+- raises the CommonAccent **`indian`** count meaningfully (the accent canary);
+- keeps the **WER proxy** low (intelligibility preserved);
+- holds the **MOS proxy** (UTMOS) near stock -- the LoRA hypothesis is that the
+  frozen base + small delta degrades MOS less than full-FT at equal accent;
+- keeps **speaker similarity** (ERes2Net cosine) to the pinned reference;
+- then **listen** -- MOS/accent classifiers are proxies (the DTW-warp path passed
+  metrics while sounding metallic).
+
+### Checkpoint x config compatibility (important)
+
+A LoRA checkpoint is `base + lora_*` tensors; the config decides whether the
+adapter topology is rebuilt at load. Three cases:
+
+- **Unmerged LoRA checkpoint + LoRA config -> correct.** This is how you EVALUATE
+  LoRA checkpoints: `exp/<run>/ckpt/*.pt` with the run's `config.yaml` (which has
+  the `lora` block). The adapters are rebuilt and the `lora_*` keys load by name.
+- **Merged checkpoint + non-LoRA config -> correct.** This is how you SERVE. After
+  `merge_lora.py` folds the delta into `weight` and strips the `lora_*` keys, the
+  file is stock-architecture and loads under any non-LoRA config of the same shape
+  (e.g. `configs/finetune_crosspair_hindi_latent_400.yaml`).
+- **Unmerged LoRA checkpoint + non-LoRA config -> INVALID.** No adapters are
+  injected, so `load_state_dict(strict=False)` silently drops every `lora_*` key
+  and you serve the frozen base (≈ stock, no accent). This raises no error -- it
+  quietly ignores the fine-tune. Never serve an unmerged checkpoint with a
+  non-LoRA config; either evaluate unmerged-with-LoRA-config, or merge first.
+
+### Deploy (serving)
+
+Fold the chosen adapter into the base and serve the merged, stock-architecture
+checkpoint (no LoRA code at inference):
+
+```bash
+python scripts/merge_lora.py \
+  --config exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r8/config.yaml \
+  --ckpt   exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r8/ckpt/000300.pt \
+  --out    exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r8/merged_step300.pt
+```
+
+Serve `merged_step300.pt` with any non-LoRA config of the same architecture (see
+the compatibility rules above). Keeping adapters *unmerged* (one frozen base +
+per-accent `lora_*` tensors, swapped at load) is the multi-condition option;
+merging is the single-condition, zero-overhead option.
+
+### Risks / unknowns
+
+- **Capacity is the open question.** r=8 on the converter is <1M params. Full-FT
+  moved the accent but cost MOS; it is not yet known whether a low-rank delta has
+  enough capacity to shift *pronunciation* (a structured, content-correlated
+  change, unlike a speaker/style tweak). Mitigation: the shipped r8 -> r16 sweep,
+  then escalate the target set (add `prenet`). If r=16 + prenet still under-moves
+  the `indian` canary, LoRA may be insufficient here and full-FT-with-anchor
+  remains the fallback.
+- **Accent direction may not lie in the low-rank subspace** the adapter spans;
+  this is exactly what the eval canary tests, not something to assume.
+- **Possible upside:** with far fewer parameters, LoRA may overfit latent-alignment
+  imperfections less than full-FT -- i.e. better MOS at equal accent. Unverified.
+- **Merge is numerically exact** (delta folded into `weight`), so the serving path
+  carries no additional risk beyond the adapter it was built from.
+
 ---
 
 ## Earlier plan: self-reconstruction fine-tunes

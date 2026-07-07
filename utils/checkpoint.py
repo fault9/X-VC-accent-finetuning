@@ -99,7 +99,21 @@ def _report_and_gate_load(
     required_missing = []
     if require_modules:
         prefixes = tuple(f"{m}." for m in require_modules)
-        required_missing = [k for k in missing_keys if k.startswith(prefixes)]
+        # LoRA adapter tensors (lora_A / lora_B) are freshly initialised by design
+        # (B is zero -> identity at init) and are ABSENT from a stock warm-start
+        # checkpoint. Exclude them so a legitimate LoRA warm-start is not misread as
+        # "training a fine-tuned module from random init".
+        required_missing = [
+            k for k in missing_keys
+            if k.startswith(prefixes) and ".lora_A" not in k and ".lora_B" not in k
+        ]
+        lora_missing = [k for k in missing_keys if ".lora_A" in k or ".lora_B" in k]
+        if lora_missing:
+            log.info(
+                "  [%s] %d LoRA adapter tensor(s) freshly initialised "
+                "(absent from warm-start checkpoint, as expected)",
+                model_name, len(lora_missing),
+            )
 
     # Report (loudly if anything looks off).
     show = lambda keys: keys[:10] + (["...(+%d more)" % (len(keys) - 10)] if len(keys) > 10 else [])

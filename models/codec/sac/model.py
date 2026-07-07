@@ -125,6 +125,23 @@ class XVC(nn.Module):
             mel_extractor=mel_extractor,
         )
 
+        # LoRA: if the training config enabled adapters, recreate the SAME adapter
+        # topology BEFORE loading so the checkpoint's lora_A/lora_B keys match by
+        # name. For a stock checkpoint loaded under a LoRA config (the eval baseline),
+        # the adapters stay at their zero-init no-op and the model reproduces stock
+        # output -- so base-vs-adapter is a clean comparison on one config.
+        lora_cfg = gen_cfg.get("lora", None) if hasattr(gen_cfg, "get") else None
+        if lora_cfg and lora_cfg.get("enabled", False):
+            from models.codec.sac.modules.lora import inject_lora_into_generator
+            info = inject_lora_into_generator(
+                model, lora_cfg, gen_cfg.get("trainable_modules", None)
+            )
+            log.info(
+                "[x-vc] LoRA injected for load: %d layer(s) under %s (r=%d, %.3fM params)",
+                info["n_adapters"], info["targets"], info["r"],
+                info["n_lora_params"] / 1e6,
+            )
+
         state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
         want_ema = bool(cfg.get("ema_update", False)) and bool(kwargs.get("ema_load", False))

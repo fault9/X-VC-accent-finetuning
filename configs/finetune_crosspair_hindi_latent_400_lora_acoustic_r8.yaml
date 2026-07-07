@@ -1,0 +1,70 @@
+# LoRA accent-adapter pilot -- parameter-efficient fallback to full-module
+# fine-tuning, for A/B against configs/finetune_crosspair_hindi_latent_400*.yaml.
+#
+# Same latent-aligned native->Hindi data and 20% reconstruction anchor as
+# finetune_crosspair_hindi_latent_400_recon20_lr2e-5, but instead of fully
+# fine-tuning acoustic_converter + prenet, the base backbone is FROZEN and only
+# rank-8 LoRA adapters on the acoustic_converter attention + FFN linears train.
+#
+# Why this target set (see CHANGES.md "LoRA accent adapters"): accent is a
+# content/pronunciation transform, and in X-VC that transform lives in the
+# converter's token-mixing (attention) and channel-mixing (FFN) path. Adapting
+# only that path with a low-rank, zero-initialised delta keeps released X-VC
+# behaviour as the anchor -- the smallest, most MOS-preserving place to inject
+# accent. prenet + semantic_adapter LoRA are separate ablations, not this pilot.
+#
+# `trainable_modules` lists the LoRA-HOST submodule(s): the freeze re-enables only
+# adapter tensors inside them, and verify_trainable_modules asserts exactly this
+# set owns the trainable params. Everything else stays exactly as released.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2     # 80% native->Hindi accent pressure, 20% clean anchor
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
+    lora:
+      enabled: true
+      r: 8
+      alpha: 16                 # scaling = alpha/r = 2.0
+      dropout: 0.0
+      target_modules: [acoustic_converter]    # defaults to trainable_modules if omitted
+      # Substring filters on qualified Linear names. Adapt attention projections
+      # (to_q/k/v/out and their joint _c variants) + both FFNs; skip AdaLN
+      # speaker-condition modulation (attn_norm_*, norm_out) and the input/proj
+      # dim adapters. The exact adapted list is printed at startup ([lora] + ...).
+      include: ["attn.", "ff_x.ff", "ff_c.ff"]
+      # train_bias: none        # none | lora_only | all  (default none)
+    optim_conf:
+      # LoRA LR runs ~5x the full-FT LR (2e-5): far fewer parameters, zero-init B
+      # damps the earliest updates, and the low-rank delta must move meaningfully
+      # within 1000 steps. Start conservative at 1e-4; raise toward 2e-4 if no
+      # Indian-accent signal appears by ~step 300 (see the eval canary).
+      lr: 0.0001

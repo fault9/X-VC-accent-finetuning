@@ -244,12 +244,47 @@ def init_model(model_config):
     return hydra.utils.instantiate(model_config)
 
 
+def maybe_inject_lora(models: Dict[str, nn.Module], config):
+    """Inject LoRA adapters into any model whose config sets `lora.enabled: true`.
+
+    Called BEFORE checkpoint load so a warm-start fills the frozen base weights
+    (which keep their original names) while the freshly-created, zero-initialised
+    adapters stay at their no-op init. No-op for configs without a `lora` block,
+    so existing (non-LoRA) fine-tune configs are unaffected.
+    """
+    from models.codec.sac.modules.lora import inject_lora_into_generator
+
+    rank0 = int(os.environ.get("RANK", 0)) == 0
+    for model_name in config.model:
+        model_cfg = config.model[model_name]
+        lora_cfg = model_cfg.get("lora", None)
+        if not lora_cfg or not lora_cfg.get("enabled", False):
+            continue
+        info = inject_lora_into_generator(
+            models[model_name], lora_cfg, model_cfg.get("trainable_modules", None)
+        )
+        if rank0:
+            log.info(
+                "[lora] '%s': r=%d alpha=%s dropout=%s -> %d Linear layer(s) adapted "
+                "under %s (%.3fM adapter params)",
+                model_name, info["r"], info["alpha"], info["dropout"],
+                info["n_adapters"], info["targets"], info["n_lora_params"] / 1e6,
+            )
+            for n in info["adapted"]:
+                log.info("[lora]   + %s", n)
+    return models
+
+
 def init_models(args, config):
     # Managing multi models with a dictionary.
     models = {}
     for model_name in config.model.keys():
         models[model_name] = init_model(config.model[model_name])
     skip_models = [k for k in config["model"] if config["model"][k]["no_grad"]]
+
+    # LoRA (if enabled): replace targeted Linear layers with adapters before any
+    # checkpoint load, so warm-start weights land in the frozen base.
+    maybe_inject_lora(models, config)
 
     if args.resume_step != 0:
         models, history_config = resume_checkpoint(
@@ -299,6 +334,25 @@ def freeze_model_parameters(models, config):
         if model_cfg.get("no_grad", False):
             for param in models[model_name].parameters():
                 param.requires_grad = False
+            continue
+
+        # (1b) LoRA fine-tuning. Freeze the entire model, then re-enable ONLY the
+        # injected adapter tensors (lora_A / lora_B, plus biases if `train_bias`
+        # requests it). The base backbone stays frozen -- this is the parameter-
+        # efficient counterpart to the whitelist unfreeze in (2). `trainable_modules`
+        # must still list the LoRA-host submodules so verify_trainable_modules and
+        # the warm-start gate see the expected set.
+        lora_cfg = model_cfg.get("lora", None)
+        if lora_cfg and lora_cfg.get("enabled", False):
+            from models.codec.sac.modules.lora import mark_only_lora_as_trainable
+            n_trainable = mark_only_lora_as_trainable(
+                models[model_name], bias=lora_cfg.get("train_bias", "none")
+            )
+            if int(os.environ.get("RANK", 0)) == 0:
+                log.info(
+                    "[lora] '%s': froze base; %.3fM trainable adapter params",
+                    model_name, n_trainable / 1e6,
+                )
             continue
 
         # (2) Whitelist-based freezing (fine-tuning). If `trainable_modules` is set,

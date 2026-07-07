@@ -1,0 +1,56 @@
+# LoRA accent-adapter capacity variant -- rank-16 (alpha 32) counterpart to
+# finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml, for the capacity
+# sweep (r8 -> r16). Everything else is identical: same latent-aligned native->
+# Hindi data, same 20% reconstruction anchor, SAME target set (acoustic_converter
+# attention + FFN only -- no prenet), same LR. Doubling the rank tests whether the
+# low-rank delta had enough capacity to shift pronunciation; if r8 under-moves the
+# Indian-accent canary, this is the first escalation before adding prenet.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2     # 80% native->Hindi accent pressure, 20% clean anchor
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
+    lora:
+      enabled: true
+      r: 16
+      alpha: 32                 # scaling = alpha/r = 2.0 (matched to r8)
+      dropout: 0.0
+      target_modules: [acoustic_converter]    # defaults to trainable_modules if omitted
+      # Adapt attention projections + both FFNs; skip AdaLN speaker-condition
+      # modulation and the input/proj dim adapters. Exact list printed at startup.
+      include: ["attn.", "ff_x.ff", "ff_c.ff"]
+      # train_bias: none        # none | lora_only | all  (default none)
+    optim_conf:
+      # Same conservative LoRA LR as r8. If accent moves but MOS is worse than the
+      # r8 run, the extra capacity is overfitting -- prefer r8. If neither rank
+      # moves the accent, escalate the target set (add prenet), not just the rank.
+      lr: 0.0001
