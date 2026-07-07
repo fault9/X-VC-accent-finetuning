@@ -231,6 +231,44 @@ Risk:
   efficiency;
 - it may also increase WER if it over-edits content, hence the conservative LR.
 
+### `crosspair_hindi_latent_400_recon30_semadapter_lr1e-5`
+
+This is the next naturalness/roboticness ablation after listening to
+`recon20_semadapter_lr1e-5`.
+
+Motivation:
+
+- adding `semantic_adapter` improved the objective curve: useful accent appeared
+  with better WER/MOS than `acoustic_converter + prenet` alone;
+- listening still reported robotic/rough artifacts;
+- training longer is unlikely to fix this, because later checkpoints mostly
+  increase accent strength rather than naturalness.
+
+Fix tested here:
+
+- same `crosspair_hindi_latent_400` data;
+- trainable modules: `acoustic_converter`, `prenet`, `semantic_adapter`;
+- lower LR remains `1e-5`;
+- reconstruction anchor increased from `0.2` to `0.3`;
+- total steps: `1000`;
+- save/validation interval: `100`.
+
+Hypothesis:
+
+```text
+70% native -> Hindi accent pressure
+30% target -> target clean reconstruction anchor
+  -> less roboticness / better MOS, possibly slightly weaker accent
+```
+
+Main comparison:
+
+- compare against `recon20_semadapter_lr1e-5`, especially steps `400`, `600`,
+  and `800`;
+- if `recon30` weakens accent too much, keep `recon20` as the better balance;
+- if `recon30` preserves a 7-9/10 Indian canary with higher MOS/listening
+  naturalness, it becomes the preferred checkpoint family.
+
 ## Local dataset build procedure
 
 The full seed cross-pair manifests live in the older local clone:
@@ -405,6 +443,19 @@ bash scripts/finetune.sh \
   --num_workers 0 2>&1 | tee latent_400_recon20_semadapter_lr1e-5.log
 ```
 
+`latent_400` with stronger reconstruction anchor plus `semantic_adapter`:
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+bash scripts/finetune.sh \
+  --accent crosspair_hindi_latent_400 \
+  --config configs/finetune_crosspair_hindi_latent_400_recon30_semadapter_lr1e-5.yaml \
+  --log_dir exp/finetune_crosspair_hindi_latent_400_recon30_semadapter_lr1e-5 \
+  --num_workers 0 2>&1 | tee latent_400_recon30_semadapter_lr1e-5.log
+```
+
 ## Evaluation protocol
 
 Evaluate only in the intended study direction:
@@ -497,6 +548,21 @@ python scripts/eval_checkpoints.py run \
   --out exp/finetune_crosspair_hindi_latent_400_recon20_semadapter_lr1e-5/eval_compare
 ```
 
+Evaluate the stronger-anchor + `semantic_adapter` run:
+
+```bash
+python scripts/eval_checkpoints.py run \
+  --run-dir exp/finetune_crosspair_hindi_latent_400_recon30_semadapter_lr1e-5 \
+  --source-dir data/eval_sources \
+  --targets-dir data/eval_targets \
+  --evaluation-plan configs/eval_hindi_native_to_accent.json \
+  --steps 100,200,300,400,600,800,1000 \
+  --include-base ckpts/xvc.pt \
+  --mos \
+  --accent-clf \
+  --out exp/finetune_crosspair_hindi_latent_400_recon30_semadapter_lr1e-5/eval_compare
+```
+
 ## Results so far
 
 `latent_200` full intermediate sweep:
@@ -543,6 +609,12 @@ Follow-up run:
 - `configs/finetune_crosspair_hindi_latent_400_recon20_semadapter_lr1e-5.yaml`;
 - goal: test whether limited content-pathway adaptation improves the accent/MOS
   tradeoff.
+
+Roboticness ablation:
+
+- `configs/finetune_crosspair_hindi_latent_400_recon30_semadapter_lr1e-5.yaml`;
+- goal: test whether a stronger clean reconstruction anchor reduces roboticness
+  while retaining enough accent signal.
 
 ---
 

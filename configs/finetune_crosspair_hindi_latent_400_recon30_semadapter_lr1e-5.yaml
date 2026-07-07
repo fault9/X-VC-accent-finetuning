@@ -1,0 +1,47 @@
+# Stronger naturalness-anchor latent-alignment pilot.
+#
+# Builds on finetune_crosspair_hindi_latent_400_recon20_semadapter_lr1e-5:
+# semantic_adapter helped WER/MOS, but listening still reported roboticness.
+# This run increases the clean reconstruction anchor from 20% to 30%.
+#
+# Hypothesis:
+#   * 70% native -> Hindi latent-aligned cross-pairs keep accent pressure
+#   * 30% target -> target reconstruction samples reinforce natural X-VC speech
+#   * semantic_adapter lets pronunciation/accent move in the content pathway
+#   * lr=1e-5 keeps that content pathway from over-editing intelligibility
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.3
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet, semantic_adapter]
+    optim_conf:
+      lr: 0.00001
