@@ -1,3 +1,84 @@
+# X-VC accent fine-tuning changes
+
+This fork tracks the PersonaPlex/X-VC accent-conversion work on top of upstream
+X-VC (MIT License; https://github.com/Jerrister/X-VC).
+
+## 2026-07-07 current path: latent-aligned native -> Hindi pilot
+
+The older self-reconstruction fine-tunes improved rendering for already-accented
+sources, but they did **not** make native input acquire a target accent. The current
+experiment therefore uses cross-paired ARCTIC prompts:
+
+```text
+native ARCTIC source (bdl/clb/rms/slt)
+  -> X-VC fine-tune target
+Hindi L2-ARCTIC target (ASI/TNI)
+```
+
+The main active dataset/config is:
+
+- data root: `data/crosspair_hindi_latent_200`
+- config: `configs/finetune_crosspair_hindi_latent_200.yaml`
+- train/val: 199 train pairs + 40 validation pairs
+- speakers: native `bdl/clb/rms/slt` -> Hindi `ASI/TNI`
+- prompt split: disjoint train/val prompt IDs
+- checkpoint start: released `ckpts/xvc.pt`
+- training default: batch 8, learning rate `3e-5`, 500 steps, save every 50 steps
+
+### Why latent alignment replaced waveform warping
+
+The first cross-pair attempts aligned recordings by waveform time-warping
+(`sourcewarp` / DTW + rubberband). They produced an audible accent signal, but also
+introduced metallic/flanger/robotic artifacts and degraded intelligibility. The
+current branch keeps the audio files natural and applies the DTW map inside training
+instead:
+
+- post-adapter WhisperVQ/semantic features are linearly aligned to the accented target
+  timeline;
+- SAC/acoustic discrete features are aligned with nearest-neighbour sampling;
+- inference remains unchanged.
+
+This keeps the training objective frame-compatible without baking time-warp artifacts
+into the waveform targets.
+
+### What validated so far
+
+Small pilots showed the native -> Hindi accent signal can appear without the severe
+quality collapse of waveform-warp training:
+
+- stock X-VC: near-zero Indian-class detections on native-source conversions;
+- 20-pair latent pilot: increased Indian-class detections with much lower WER damage
+  than the source-warp pilot;
+- `3e-5` was a better pilot setting than `1e-5` for accent signal/quality balance.
+
+The next gate is the `crosspair_hindi_latent_200` run. Evaluate stock vs fine-tuned
+checkpoints only in the intended study direction: unseen native-English sources into
+assigned Hindi target references, with real accented recordings used only as positive
+reference controls.
+
+### Required pretrained assets after a container reset
+
+The GitHub clone is only code. A fresh container also needs:
+
+- `ckpts/xvc.pt` from the released X-VC checkpoint;
+- `pretrained/speech_eres2net_sv_en_voxceleb_16k/` from ModelScope;
+- cached `zai-org/glm-4-voice-tokenizer` from Hugging Face.
+
+Known dependency pin after installing ModelScope:
+
+```bash
+python -m pip install 'huggingface_hub>=0.23.2,<1.0' \
+  'fsspec[http]<2025.0,>=2022.5.0' \
+  'packaging<25.0,>=20.0'
+```
+
+---
+
+## Earlier plan: self-reconstruction fine-tunes
+
+The notes below describe the first fine-tuning plan. They are retained as project
+history, but this is **not** the active approach for live native-speaker accenting.
+
 # How we fine-tune X-VC for accents
 
 A plain-language description of our accent fine-tuning method, why each choice was
