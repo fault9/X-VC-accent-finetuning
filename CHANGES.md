@@ -5,6 +5,224 @@ X-VC (MIT License; https://github.com/Jerrister/X-VC). This file is intentionall
 procedural: it documents what was tried, why the approach changed, and how to
 reproduce the current fine-tuning/evaluation path.
 
+## 2026-07-08 branch: MFA-guided latent alignment
+
+Branch: `mfa-latent-alignment`.
+
+Rationale: the `latent_400` semantic-adapter sweeps showed that changing
+learning rate and reconstruction ratio did not remove the robotic quality once
+the Indian-accent signal became strong. That suggests the remaining bottleneck
+may be the sentence-level acoustic DTW map itself. DTW aligns by acoustic
+similarity, but accent conversion deliberately changes acoustics, so DTW can
+match the wrong local speech regions or overfit accent differences.
+
+This branch adds a text-pivot alignment alternative:
+
+```text
+source audio -> MFA word/phone timings for the ARCTIC prompt
+target audio -> MFA word/phone timings for the same ARCTIC prompt
+target frames -> matching source word/phone region -> normalized source time
+```
+
+Both waveforms remain pristine. Only the training-time latent alignment map
+changes.
+
+New files:
+
+- `scripts/prepare_mfa_crosspairs.py`
+  - filters/selects cross-pairs;
+  - writes MFA corpora as `.wav + .lab`;
+  - records selected rows in `selected_manifests/{train,val}.jsonl`.
+- `scripts/build_mfa_latent_crosspairs.py`
+  - parses MFA TextGrid output;
+  - prefers phone tiers and falls back to word tiers;
+  - writes normal X-VC latent manifests with `latent_alignment_path`.
+- `configs/finetune_crosspair_hindi_mfa_latent_ab_semadapter_lr1e-5.yaml`
+  - small MFA smoke config.
+- `configs/finetune_crosspair_hindi_mfa_latent_strict_semadapter_lr1e-5.yaml`
+  - scaled strict config if the smoke passes.
+
+### MFA pilot build commands
+
+Prepare a small pilot first:
+
+```bash
+cd /mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment
+source ~/xvc-align/bin/activate
+
+python scripts/prepare_mfa_crosspairs.py \
+  --train-manifest /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning/data/crosspair_hindi/manifests/train.jsonl \
+  --val-manifest /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning/data/crosspair_hindi/manifests/val.jsonl \
+  --resplit-val-prompts 40 \
+  --source-root /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning \
+  --l2-root /mnt/d/datasets/arctic-audio/l2arctic \
+  --prompts-file /mnt/d/l2arctic_release_v5.0/PROMPTS \
+  --min-duration 2.6 \
+  --min-global-stretch 0.85 \
+  --max-global-stretch 1.20 \
+  --train-limit 20 \
+  --val-limit 20 \
+  --out data/mfa_hindi_ab
+```
+
+Run MFA over the prepared corpora. Exact model names depend on the local MFA
+install, but the intended structure is:
+
+```bash
+mkdir -p data/mfa_hindi_ab/mfa_align
+
+mfa align \
+  data/mfa_hindi_ab/mfa_corpus/source \
+  english_us_arpa \
+  english_mfa \
+  data/mfa_hindi_ab/mfa_align/source \
+  --output_format long_textgrid \
+  --clean
+
+mfa align \
+  data/mfa_hindi_ab/mfa_corpus/target \
+  english_us_arpa \
+  english_mfa \
+  data/mfa_hindi_ab/mfa_align/target \
+  --output_format long_textgrid \
+  --clean
+```
+
+Then build the X-VC dataset:
+
+```bash
+python scripts/build_mfa_latent_crosspairs.py \
+  --prepared-root data/mfa_hindi_ab \
+  --source-align-dir data/mfa_hindi_ab/mfa_align/source \
+  --target-align-dir data/mfa_hindi_ab/mfa_align/target \
+  --source-root /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning \
+  --l2-root /mnt/d/datasets/arctic-audio/l2arctic \
+  --prompts-file /mnt/d/l2arctic_release_v5.0/PROMPTS \
+  --tier phones \
+  --fallback-tier words \
+  --min-label-match 0.80 \
+  --min-duration 2.6 \
+  --out data/crosspair_hindi_mfa_latent_ab
+
+python scripts/validate_crosspairs.py \
+  --data-root data/crosspair_hindi_mfa_latent_ab \
+  --min-duration 2.6
+```
+
+Gate: compare this MFA pilot against the current best
+`latent_400 recon20 + semantic_adapter + lr1e-5`. If MFA reaches similar Indian
+accent counts with better listening quality/MOS, scale to the strict full set.
+If not, the roboticness is probably not mainly a DTW alignment problem.
+
+### MFA protocol check before scaling
+
+The first MFA smoke revealed that the phone tier can be present but unusable
+(`spn` only), while the word tier is usable. Per MFA's own workflow, this should
+be treated as an OOV/dictionary/G2P issue, not as high-quality phone alignment:
+
+- `mfa align` aligns a corpus using a pronunciation dictionary plus acoustic
+  model and can output TextGrid tiers.
+- MFA exposes OOV/G2P hooks (`--g2p_model_path` for legacy `mfa align`, and
+  `--use_g2p` for newer HF-model alignment) that should be used when dictionary
+  coverage is incomplete.
+- MFA also supports `--fine_tune` and alignment-analysis outputs; these are the
+  appropriate next tools if the aligner is being used as a research-grade timing
+  source rather than just a rough transcript aligner.
+
+Therefore the current word-tier fallback is an **experimental alignment guardrail
+test**, not the final alignment protocol. We use it only with strict QC:
+
+- train/val split remains by ARCTIC prompt ID;
+- both source and target WAVs remain pristine;
+- TextGrid label match rate must be high;
+- word-tier fallback uses word **centres**, not boundaries, to avoid extreme
+  local timing jumps;
+- local stretch is bounded (`--min-local-stretch 0.125`,
+  `--max-local-stretch 8.0`);
+- any full-scale MFA build should first fix phone-tier coverage via dictionary
+  or G2P, then prefer phone-level anchors.
+
+### 200-pair MFA pilot
+
+The 20-pair smoke is too small to train a meaningful accent, so the next
+non-toy MFA check is a 200-pair pilot:
+
+```bash
+cd /mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment
+source ~/xvc-align/bin/activate
+
+python scripts/prepare_mfa_crosspairs.py \
+  --train-manifest /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning/data/crosspair_hindi/manifests/train.jsonl \
+  --val-manifest /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning/data/crosspair_hindi/manifests/val.jsonl \
+  --resplit-val-prompts 80 \
+  --source-root /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning \
+  --l2-root /mnt/d/datasets/arctic-audio/l2arctic \
+  --prompts-file /mnt/d/l2arctic_release_v5.0/PROMPTS \
+  --min-duration 2.6 \
+  --min-global-stretch 0.85 \
+  --max-global-stretch 1.20 \
+  --train-limit 200 \
+  --val-limit 40 \
+  --out data/mfa_hindi_200
+```
+
+Run MFA, preferably with OOV/G2P handling if available:
+
+```bash
+micromamba activate mfa
+cd /mnt/c/Users/felix/Scripts/kth-project/X-VC-latent-alignment
+
+mkdir -p data/mfa_hindi_200/mfa_align
+
+mfa align \
+  data/mfa_hindi_200/mfa_corpus/source \
+  english_us_arpa \
+  english_mfa \
+  data/mfa_hindi_200/mfa_align/source \
+  --output_format long_textgrid \
+  --clean
+
+mfa align \
+  data/mfa_hindi_200/mfa_corpus/target \
+  english_us_arpa \
+  english_mfa \
+  data/mfa_hindi_200/mfa_align/target \
+  --output_format long_textgrid \
+  --clean
+```
+
+Then build and validate:
+
+```bash
+source ~/xvc-align/bin/activate
+
+python scripts/build_mfa_latent_crosspairs.py \
+  --prepared-root data/mfa_hindi_200 \
+  --source-align-dir data/mfa_hindi_200/mfa_align/source \
+  --target-align-dir data/mfa_hindi_200/mfa_align/target \
+  --source-root /mnt/c/Users/felix/Scripts/X-VC-accent-finetuning \
+  --l2-root /mnt/d/datasets/arctic-audio/l2arctic \
+  --prompts-file /mnt/d/l2arctic_release_v5.0/PROMPTS \
+  --tier phones \
+  --fallback-tier words \
+  --mfa-anchor-mode auto \
+  --min-label-match 0.80 \
+  --min-local-stretch 0.125 \
+  --max-local-stretch 8.0 \
+  --min-duration 2.6 \
+  --out data/crosspair_hindi_mfa_latent_200
+
+python scripts/validate_crosspairs.py \
+  --data-root data/crosspair_hindi_mfa_latent_200 \
+  --min-duration 2.6
+```
+
+Training config:
+
+```bash
+configs/finetune_crosspair_hindi_mfa_latent_200_semadapter_lr1e-5.yaml
+```
+
 ## 2026-07-07 active procedure: latent-aligned native -> Hindi conversion
 
 ### Research requirement

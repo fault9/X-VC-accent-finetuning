@@ -1,0 +1,44 @@
+# MFA-guided latent-alignment smoke.
+#
+# Use after building data/crosspair_hindi_mfa_latent_ab with
+# prepare_mfa_crosspairs.py + MFA + build_mfa_latent_crosspairs.py.
+#
+# Hypothesis: transcript/phone-guided MFA alignment reduces the roboticness
+# caused by global acoustic DTW while preserving the native -> Hindi accent
+# transfer signal.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_mfa_latent_ab/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_mfa_latent_ab/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 500
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet, semantic_adapter]
+    optim_conf:
+      lr: 0.00001

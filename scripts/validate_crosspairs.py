@@ -314,11 +314,16 @@ def main() -> int:
                 )
         local = align_meta.get("local_stretch_ratio") or {}
         ratio_epsilon = 1e-3  # align_meta stores rounded summary statistics
-        if local and (
+        if (
+            local
+            and "allowed_min" in local
+            and "allowed_max" in local
+            and (
             float(local.get("min", 0)) + ratio_epsilon
             < float(local.get("allowed_min", 0))
             or float(local.get("max", 1e9)) - ratio_epsilon
             > float(local.get("allowed_max", 1e9))
+            )
         ):
             failures.append(f"align_meta: local stretch guard violated: {local}")
         allowed_global = align_meta.get("allowed_global_stretch") or [0.0, 1e9]
@@ -338,12 +343,13 @@ def main() -> int:
                 failures.append(
                     f"{source_utt}: global stretch {ratio:.4f} outside {allowed_global}"
                 )
-            removal = float(qc["anchor_removal_fraction"])
-            if removal > max_anchor_removal:
-                failures.append(
-                    f"{source_utt}: anchor removal {removal:.1%} "
-                    f"> {max_anchor_removal:.1%}"
-                )
+            if "anchor_removal_fraction" in qc:
+                removal = float(qc["anchor_removal_fraction"])
+                if removal > max_anchor_removal:
+                    failures.append(
+                        f"{source_utt}: anchor removal {removal:.1%} "
+                        f"> {max_anchor_removal:.1%}"
+                    )
 
     report = {
         "train_pairs": len(splits["train"]),
