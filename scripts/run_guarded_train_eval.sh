@@ -17,6 +17,12 @@
 #     --log_dir exp/finetune_crosspair_hindi_latent_800_strict_recon20_semadapter_lr1e-5 \
 #     --validate_min_duration 2.6 \
 #     --steps 100,200,300,400,600,800,1000
+#
+# Eval-only after a completed training run:
+#   bash scripts/run_guarded_train_eval.sh \
+#     --eval_only \
+#     --log_dir exp/finetune_crosspair_hindi_latent_800_strict_recon20_semadapter_lr1e-5 \
+#     --steps 100,200,300,400,600,800,1000
 
 set -euo pipefail
 
@@ -34,6 +40,7 @@ gpus=1
 resume_step=0
 port=10201
 seed=1234
+run_train=1
 run_eval=1
 mos=1
 accent_clf=1
@@ -58,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --resume_step)           resume_step="$2"; shift 2 ;;
     --port)                  port="$2"; shift 2 ;;
     --seed)                  seed="$2"; shift 2 ;;
+    --eval_only)             run_train=0; run_eval=1; shift 1 ;;
     --no_eval)               run_eval=0; shift 1 ;;
     --no_mos)                mos=0; shift 1 ;;
     --no_accent_clf)         accent_clf=0; shift 1 ;;
@@ -66,8 +74,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$accent" || -z "$config" || -z "$log_dir" ]]; then
-  echo "missing required --accent, --config, or --log_dir" >&2
+if [[ -z "$log_dir" ]]; then
+  echo "missing required --log_dir" >&2
+  usage
+  exit 2
+fi
+if [[ "$run_train" -eq 1 ]] && [[ -z "$accent" || -z "$config" ]]; then
+  echo "training requires --accent and --config" >&2
   usage
   exit 2
 fi
@@ -161,6 +174,7 @@ echo "log_dir               : $log_dir"
 echo "checkpoint            : $checkpoint"
 echo "steps                 : $steps"
 echo "validate_min_duration : $validate_min_duration"
+echo "run_train             : $run_train"
 echo "run_eval              : $run_eval"
 echo "master_log            : $master_log"
 hostname
@@ -168,11 +182,27 @@ pwd
 
 echo ""
 echo "=== preflight files ==="
-test -f "$config"
 test -f "$checkpoint"
-if [[ "$accent" == crosspair_* ]]; then
+if [[ "$run_train" -eq 1 ]]; then
+  test -f "$config"
+fi
+if [[ "$run_train" -eq 1 && "$accent" == crosspair_* ]]; then
   test -f "data/${accent}/manifests/train.jsonl"
   test -f "data/${accent}/manifests/val.jsonl"
+fi
+if [[ "$run_eval" -eq 1 ]]; then
+  test -d "$log_dir"
+  test -d "$source_dir"
+  test -d "$targets_dir"
+  test -f "$evaluation_plan"
+  source_count="$(find "$source_dir" -maxdepth 1 -type f -name '*.wav' | wc -l)"
+  target_count="$(find "$targets_dir" -maxdepth 1 -type f -name '*.wav' | wc -l)"
+  echo "eval source wavs      : $source_count"
+  echo "eval target wavs      : $target_count"
+  if [[ "$source_count" -eq 0 || "$target_count" -eq 0 ]]; then
+    echo "[error] eval source/target directories must contain wav files" >&2
+    exit 1
+  fi
 fi
 
 echo ""
@@ -199,7 +229,7 @@ if pgrep -af 'torchrun|deepspeed|bins.train|eval_checkpoints' ; then
   exit 1
 fi
 
-if [[ "$accent" == crosspair_* ]]; then
+if [[ "$run_train" -eq 1 && "$accent" == crosspair_* ]]; then
   echo ""
   echo "=== preflight crosspair validation ==="
   python scripts/validate_crosspairs.py \
@@ -207,21 +237,23 @@ if [[ "$accent" == crosspair_* ]]; then
     --min-duration "$validate_min_duration"
 fi
 
-train_cmd=(
-  env "XVC_VALIDATE_MIN_DURATION=${validate_min_duration}"
-  bash scripts/finetune.sh
-  --accent "$accent"
-  --config "$config"
-  --log_dir "$log_dir"
-  --checkpoint "$checkpoint"
-  --gpus "$gpus"
-  --resume_step "$resume_step"
-  --port "$port"
-  --seed "$seed"
-  --num_workers "$num_workers"
-)
+if [[ "$run_train" -eq 1 ]]; then
+  train_cmd=(
+    env "XVC_VALIDATE_MIN_DURATION=${validate_min_duration}"
+    bash scripts/finetune.sh
+    --accent "$accent"
+    --config "$config"
+    --log_dir "$log_dir"
+    --checkpoint "$checkpoint"
+    --gpus "$gpus"
+    --resume_step "$resume_step"
+    --port "$port"
+    --seed "$seed"
+    --num_workers "$num_workers"
+  )
 
-run_isolated "train ${safe_name}" "${train_cmd[@]}"
+  run_isolated "train ${safe_name}" "${train_cmd[@]}"
+fi
 
 if [[ "$run_eval" -eq 1 ]]; then
   eval_cmd=(
