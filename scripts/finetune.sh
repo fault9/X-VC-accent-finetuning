@@ -146,6 +146,7 @@ echo "seed        : $seed"
 echo "lr override : ${lr:-<config default>}"
 echo "resume_step : $resume_step"
 echo "checkpoint  : ${checkpoint_arg:-<resume from $log_dir/ckpt>}"
+echo "validate min duration : ${XVC_VALIDATE_MIN_DURATION:-3.0}"
 
 # Cross-pair runs are unsafe unless prompt splits, paths, sample formats and
 # aligned lengths pass the hard preflight. Run this before GPU startup.
@@ -156,7 +157,9 @@ if [[ "$accent" == crosspair_* ]]; then
     echo "Cross-pair manifests missing under $crosspair_root" >&2
     exit 1
   fi
-  python scripts/validate_crosspairs.py --data-root "$crosspair_root"
+  python scripts/validate_crosspairs.py \
+    --data-root "$crosspair_root" \
+    --min-duration "${XVC_VALIDATE_MIN_DURATION:-3.0}"
 fi
 
 # Reproducibility record — BEFORE training starts, so even a crashed run is traceable.
