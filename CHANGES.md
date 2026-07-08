@@ -223,6 +223,11 @@ Training config:
 configs/finetune_crosspair_hindi_mfa_latent_200_semadapter_lr1e-5.yaml
 ```
 
+Because this pilot intentionally lowers the minimum pair duration to 2.6s
+(X-VC trains on 2.4s crops), launch fine-tuning with
+`XVC_VALIDATE_MIN_DURATION=2.6` so the built-in preflight uses the same threshold
+as dataset construction.
+
 ## 2026-07-07 active procedure: latent-aligned native -> Hindi conversion
 
 ### Research requirement
