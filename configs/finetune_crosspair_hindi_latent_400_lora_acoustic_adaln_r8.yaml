@@ -1,0 +1,60 @@
+# PATH C ablation -- LoRA r8 on acoustic_converter attention + FFN PLUS the
+# AdaLN speaker-condition modulation linears (attn_norm_x per block, norm_out
+# final), which every previous LoRA arm deliberately excluded. This is the last
+# untested realization-side subspace.
+#
+# Post-diagnostic expectation (see CHANGES.md): modulation gates/scales features
+# per condition, so it can plausibly capture GLOBAL accent coloration (vowel
+# space tilt, resonance shifts) but structurally cannot perform segmental phone
+# substitution -- content edits live in the input streams. Bounded upside; run
+# once to close out the freeze-set question, not as the primary path.
+#
+# Identical to finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml except
+# the include filter. Startup layer count must EXCEED 69 (the extra AdaLN
+# linears); if it prints exactly 69, the patterns regressed -- abort.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]
+    lora:
+      enabled: true
+      r: 8
+      alpha: 16
+      dropout: 0.0
+      target_modules: [acoustic_converter]
+      # r8 set + AdaLN modulation: "attn_norm_x." matches the per-block
+      # AdaLayerNormZero linears ("attn." does NOT match "attn_norm_x." --
+      # substring needs the dot), "norm_out." the final AdaLayerNormZeroFinal.
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "attn_norm_x.", "norm_out."]
+    optim_conf:
+      lr: 0.0001
