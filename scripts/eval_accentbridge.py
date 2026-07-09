@@ -55,6 +55,11 @@ def main(argv=None) -> int:
                          "(match this to the bridge's training filter)")
     ap.add_argument("--synthesize", type=int, default=0,
                     help="also render N val pairs to wav through X-VC + bridge")
+    ap.add_argument("--delta-scale", type=float, default=1.0,
+                    help="scale the bridge's residual at synthesis "
+                         "(edited = x + SCALE*delta): sweeps along the learned "
+                         "direction without retraining; wavs are tagged with "
+                         "the scale")
     ap.add_argument("--config", default=None, help="X-VC config (for --synthesize)")
     ap.add_argument("--ckpt", default=None, help="X-VC checkpoint (for --synthesize)")
     ap.add_argument("--device", type=int, default=0)
@@ -151,7 +156,7 @@ def main(argv=None) -> int:
             sem = model.semantic_encoder.embed_ids(feat)
             sem = model.semantic_adapter(sem.transpose(1, 2))       # (B, 1024, T50)
             if use_bridge:
-                sem = bridge_d(sem)                                  # THE insertion
+                sem = sem + args.delta_scale * bridge_d.delta(sem)   # THE insertion
             sem = sem.transpose(1, 2)
             z = model.acoustic_encoder(src)
             zq = model.acoustic_quantizer(z)[0]
@@ -160,9 +165,11 @@ def main(argv=None) -> int:
             x = model.acoustic_converter(x, frame_cond, spk)
             return to_numpy_audio(model.acoustic_decoder(x))
 
+        scale_tag = (f"bridged_x{args.delta_scale:g}"
+                     if args.delta_scale != 1.0 else "bridged")
         for it in items[: args.synthesize]:
             m = it["meta"]
-            for tag, ub in (("bridged", True), ("plain", False)):
+            for tag, ub in ((scale_tag, True), ("plain", False)):
                 wav = synth(m["source_wav_path"], m["target_wav_path"], ub)
                 sf.write(str(sample_dir / f"{m['source_utt']}__{tag}.wav"),
                          np.asarray(wav, dtype="float32"), int(cfg["sample_rate"]))
