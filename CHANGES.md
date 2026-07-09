@@ -937,6 +937,27 @@ references as the full-FT runs (base rows identical across runs):
   a new module. `semantic_adapter` stays frozen. Startup must report BOTH hosts
   and 101 adapted layers; if prenet contributes 0 the include filter regressed
   and the run silently repeats r8 -- abort.
+- **+prenet r8 result**: current best LoRA candidate (pending accent-count
+  verification from the per-clip CSV). Off-trend U-shape: MOS bottoms at step
+  400 (2.22) then RECOVERS to 2.51 at 1000 with sim recovering too (0.595 ->
+  0.607), while WER degrades exactly in the recovery window (0.02 -> 0.056) --
+  reads as over-push then partial re-convergence, possibly trading articulation
+  for smoothness. Listen to 400-vs-1000 of the same clip to confirm.
+- **Gentle arm** --
+  `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_prenet_r8_lr5e-5_recon30.yaml`:
+  same target set, lr halved to 5e-5 AND recon anchor raised to 30% (one
+  deliberate "gentleness" package, not a factorial ablation), total_step 2000
+  because both knobs slow accent acquisition and 1000 would likely be
+  inconclusive. Eval grid: `--steps 100,200,300,400,600,800,1000,1200,1600,2000`.
+- **Metric calibration** -- `scripts/calibrate_eval_floor.py` scores REAL
+  recordings (raw TNI/ASI corpus clips, optionally a cleaner accented corpus and
+  the native sources) with the exact eval metric stack, no conversion involved.
+  Establishes the achievable ceiling per proxy: MOS floor of genuine L2 speech,
+  the accent classifier's actual recall on real accented clips (the canary
+  ceiling is NOT 20/20), the intra-speaker ERes2Net sim ceiling, and the ASR
+  accent penalty. Run BEFORE spending further GPU on artifact-reduction arms:
+  if the raw L2 corpus scores ~2.5-3.0 MOS, recent runs are near ceiling and
+  the "metallic drift" is substantially the measuring stick.
 
 ---
 

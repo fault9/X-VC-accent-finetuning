@@ -1,0 +1,72 @@
+# LoRA accent-adapter "gentle" arm -- acoustic_converter + prenet at r=8, with
+# HALVED LR (5e-5) and a STRONGER clean-reconstruction anchor (30%).
+#
+# Motivation from the first +prenet run (see CHANGES.md "Pilot results"): the
+# target set has enough capacity to move the accent, but the run showed an
+# off-trend U-shape -- MOS bottomed at step 400 (2.22) then RECOVERED to 2.51 by
+# 1000 while WER degraded in the same window (0.02 -> 0.056), i.e. over-pushing
+# followed by partial re-convergence. This arm reduces the push directly instead
+# of adding capacity (r16 already showed more rank = worse WER, no accent gain).
+#
+# Two knobs move together (lr AND recon anchor) -- deliberately a single
+# "gentleness" package, not a factorial ablation. If it works we accept not
+# knowing which knob mattered; if it fails, gentleness as such is falsified.
+#
+# total_step is 2000, NOT 1000: half the LR + stronger anchor slows accent
+# acquisition, and accent arrived late in every prior run. At 1000 steps this
+# arm would likely end "no accent yet -- inconclusive". Suggested eval grid:
+#   --steps 100,200,300,400,600,800,1000,1200,1600,2000
+#
+# Interpret alongside scripts/calibrate_eval_floor.py output: if the raw L2
+# corpus scores ~2.5-3.0 on the MOS proxy, this arm is chasing a ceiling, not
+# an artifact.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.3     # raised from 0.2: stronger clean anchor vs drift
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 2000
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]   # LoRA-host modules (bases frozen)
+    lora:
+      enabled: true
+      r: 8
+      alpha: 16                 # scaling = alpha/r = 2.0
+      dropout: 0.0
+      target_modules: [acoustic_converter, prenet]
+      # Identical target set to ..._lora_acoustic_prenet_r8.yaml: converter
+      # attention + FFN, prenet ConvNeXt pwconv1/pwconv2. Startup must report
+      # 101 adapted layers across BOTH hosts; if prenet contributes 0 the
+      # include filter regressed and the run silently repeats converter-only r8.
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "pwconv"]
+      # train_bias: none        # none | lora_only | all  (default none)
+    optim_conf:
+      # Halved from the 1e-4 used by every prior LoRA run. Only lr and
+      # reconstruction_ratio differ from ..._lora_acoustic_prenet_r8.yaml.
+      lr: 0.00005
