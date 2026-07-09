@@ -912,6 +912,32 @@ merging is the single-condition, zero-overhead option.
 - **Merge is numerically exact** (delta folded into `weight`), so the serving path
   carries no additional risk beyond the adapter it was built from.
 
+### Pilot results (r8, r16) and the +prenet ablation
+
+`latent_400` LoRA runs, 20-clip eval (10 clb->TNI, 10 rms->ASI), same pinned
+references as the full-FT runs (base rows identical across runs):
+
+- **r8 (converter-only)**: WER held at base level for all 1000 steps
+  (0.016 -> 0.022; full-FT degraded 4-8x over the same horizon) -- the low-rank
+  constraint protects intelligibility as hypothesised. But the accent canary
+  under-moves (indian 1/20 at step 200, peak 7/20 at 800), and MOS decays on
+  the same trajectory as full-FT (3.70 -> 2.33). Notably MOS loses a full point
+  by step 200 *before* any accent registers, so the MOS problem is not
+  accent-confound alone and not adapter capacity -- suspicion moves to the
+  data/objective side (target-corpus channel; regression-only drift).
+- **r16 (converter-only, 2x rank)**: no improvement over r8 -- same MOS
+  trajectory, no accent gain, and WER now degrades (0.016 -> 0.056 at 1000).
+  Rank inside the converter subspace is NOT the bottleneck; do not climb the
+  rank ladder further on this target set.
+- **Next: widen the subspace, not the rank** --
+  `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_prenet_r8.yaml`
+  (Option 2 from the recommendation table): r=8 adapters on the converter set
+  PLUS prenet's ConvNeXt channel-mixing linears (`pwconv1`/`pwconv2`, 16 blocks
+  -> 32 layers). 101 adapted layers, ~1.6M trainable -- the r16 budget spent on
+  a new module. `semantic_adapter` stays frozen. Startup must report BOTH hosts
+  and 101 adapted layers; if prenet contributes 0 the include filter regressed
+  and the run silently repeats r8 -- abort.
+
 ---
 
 ## Earlier plan: self-reconstruction fine-tunes

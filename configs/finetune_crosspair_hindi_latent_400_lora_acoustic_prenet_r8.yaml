@@ -1,0 +1,77 @@
+# LoRA accent-adapter ablation -- acoustic_converter + prenet target set
+# ("Option 2" escalation from CHANGES.md "LoRA accent adapters").
+#
+# Motivation from the r8/r16 converter-only runs: LoRA preserved WER (r8 held it
+# at base level for 1000 steps, unlike full FT) but under-moved the Indian-accent
+# canary, and DOUBLING THE RANK (r16) did not help -- it only degraded WER. So
+# capacity inside the converter subspace is not the bottleneck; this ablation
+# widens the SUBSPACE instead, adding rank-8 adapters on prenet's ConvNeXt
+# channel-mixing linears (pwconv1/pwconv2; 16 blocks -> 32 layers) on top of the
+# converter's attention + FFN set (69 layers). Total ~1.6M trainable at r=8 --
+# roughly the r16 run's budget, spent on a new module instead of a bigger rank.
+# semantic_adapter stays fully frozen (that is a separate, riskier ablation).
+#
+# Everything except the target set is identical to
+# finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml: same latent-aligned
+# native->Hindi data, 20% reconstruction anchor, r=8/alpha=16, LR 1e-4.
+#
+# `trainable_modules` lists the LoRA-HOST submodules: the freeze re-enables only
+# adapter tensors inside them, and verify_trainable_modules asserts exactly this
+# set owns the trainable params. Startup must report BOTH hosts and 101 adapted
+# layers (69 converter + 32 prenet); if prenet contributes 0, the include filter
+# regressed and the run is just r8 again -- abort.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2     # 80% native->Hindi accent pressure, 20% clean anchor
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]   # LoRA-host modules (bases frozen)
+    lora:
+      enabled: true
+      r: 8
+      alpha: 16                 # scaling = alpha/r = 2.0
+      dropout: 0.0
+      target_modules: [acoustic_converter, prenet]
+      # Substring filters on qualified Linear names, applied under both hosts:
+      #   converter -- attention projections (to_q/k/v/out + joint _c variants)
+      #     and both FFNs; AdaLN modulation and input/proj dim adapters skipped.
+      #   prenet -- ConvNeXt channel-mixing pwconv1/pwconv2 only; the linear_pre/
+      #     linear dim adapters skipped (same policy as the converter's).
+      # "pwconv" matches nothing inside acoustic_converter, and none of the
+      # converter patterns match inside prenet, so the union is exact.
+      # The adapted list is printed at startup ([lora] + ...).
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "pwconv"]
+      # train_bias: none        # none | lora_only | all  (default none)
+    optim_conf:
+      # Same LoRA LR as the r8/r16 runs so the target-set change is the only
+      # variable. If prenet adapters destabilise training (val loss spikes),
+      # drop to 5e-5 before concluding anything about the target set.
+      lr: 0.0001
