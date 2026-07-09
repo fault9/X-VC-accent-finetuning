@@ -958,6 +958,45 @@ references as the full-FT runs (base rows identical across runs):
   accent penalty. Run BEFORE spending further GPU on artifact-reduction arms:
   if the raw L2 corpus scores ~2.5-3.0 MOS, recent runs are near ceiling and
   the "metallic drift" is substantially the measuring stick.
+- **Calibration result**: raw L2 corpus scores MOS ~3.8-3.9 (native sources
+  4.40; worst genuine clip ~2.9), so the fine-tunes' 2.2-2.5 is a REAL
+  training-induced artifact gap of ~1.3 MOS, not a metric penalty. Classifier
+  ceiling on genuine L2 speech: indian_frac 0.94 (TNI) / 0.76 (ASI). Sim
+  ceiling (intra-speaker vs pinned refs): 0.755 / 0.800. Also found: the ASI
+  pinned reference itself scores MOS 3.06 (vs 3.80 corpus mean) -- re-pinning
+  from MOS-screened clips is a cheap candidate improvement for ASI conversions
+  (changes the pinned stimulus; old tables stop being comparable).
+- **Prior MFA attempt (context, do not re-run as-is)**: a phone-level MFA
+  alignment path was already tried (`crosspair_hindi_mfa_latent_200`). It
+  silently fell back to WORD-tier alignment (final mfa_tier_counts contained
+  words only), its mel-dist QC was worse than uniform resampling (~13.77 vs
+  12.84), and its training eval was poor (MOS ~1.8-2.34, degraded WER, almost
+  no Indian-accent signal). Word-tier MFA is falsified; "switch to MFA" is not
+  a validated fallback.
+- **Framing correction (important for future alignment work)**: earlier
+  discussion described the latent-alignment risk as "warped latent TARGETS".
+  That is WRONG for this codebase. The DTW map warps the SOURCE-side frozen
+  streams -- the pristine native clip's semantic embedding and quantized
+  acoustic latents, resampled onto the L2 timeline inside
+  `XVC._latent_aligned_source` (linear interp for continuous streams, nearest
+  frame for quantized) -- while the training target is the PRISTINE L2
+  waveform, which calibration showed is clean (MOS ~3.8-3.9). So the open
+  question is the warped-INPUT regime (can the stack produce clean audio from
+  time-warped input streams; do train-time warped inputs mismatch the
+  unwarped inputs seen at inference), NOT target corruption. Reason about
+  warped inputs, not warped targets.
+- **Supervision-quality diagnostic** -- `scripts/decode_latent_targets.py`
+  decodes what training actually feeds the loss, through the REAL dataset +
+  `XVC.forward` code path (nothing reimplemented; branch choice verified per
+  run): `identity_recon` (unwarped L2 latents, encode/decode control) vs
+  `warped_crosspair` (native latents DTW-warped to the L2 timeline -- the
+  accent-pressure inputs) vs `target_segment` (the pristine supervision
+  audio). Scores with the calibration stack + the dataset-QC `mel_dist`.
+  Decision rule: identity high / warped low -> alignment is the artifact
+  source, invest in genuinely better alignment (proper phone-tier MFA or
+  another method -- word-tier already failed); both high -> move to
+  objective/feature-matching fixes (e.g. adversarial term is off in all
+  fine-tunes); identity itself low -> inspect the latent-training round trip.
 
 ---
 
