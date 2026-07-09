@@ -116,6 +116,10 @@ def main(argv=None) -> int:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--lambda-id", type=float, default=0.5)
     ap.add_argument("--lambda-smooth", type=float, default=0.1)
+    ap.add_argument("--gap-weight", type=float, default=0.0,
+                    help="weight target-loss frames by their src->tgt feature "
+                         "gap (0 = uniform): concentrates capacity on "
+                         "accent-bearing frames instead of the global offset")
     ap.add_argument("--limit", type=int, default=None, help="cap train pairs (smoke)")
     ap.add_argument("--target-speaker", default=None,
                     help="train a per-persona bridge: keep only pairs whose "
@@ -162,7 +166,14 @@ def main(argv=None) -> int:
         batch_items = random.sample(train_items, min(args.batch, len(train_items)))
         src, tgt, mask = collate(batch_items, device)
         edited, delta = bridge(src, return_delta=True)
-        l_tgt = masked_mse(edited, tgt, mask)
+        if args.gap_weight > 0:
+            with torch.no_grad():
+                g = (tgt - src).norm(dim=1, keepdim=True) * mask   # (B,1,T)
+                g = g / (g.sum() / mask.sum().clamp(min=1.0))      # mean 1 on valid
+            w = (1.0 + args.gap_weight * g) * mask
+            l_tgt = (((edited - tgt) ** 2) * w).sum() / (w.sum() * src.shape[1] + 1e-8)
+        else:
+            l_tgt = masked_mse(edited, tgt, mask)
         id_out = bridge(tgt)
         l_id = masked_mse(id_out, tgt, mask)
         l_sm = ((delta[:, :, 1:] - delta[:, :, :-1]).abs() * mask[:, :, 1:]).sum() \
