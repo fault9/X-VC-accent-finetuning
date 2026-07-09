@@ -912,6 +912,23 @@ merging is the single-condition, zero-overhead option.
 - **Merge is numerically exact** (delta folded into `weight`), so the serving path
   carries no additional risk beyond the adapter it was built from.
 
+### Hygiene verification
+
+`scripts/verify_lora_hygiene.py` closes the "is the LoRA implementation buggy"
+question with five offline checks (exit 0 = clean): (A) full adapted-layer list
+per host module; (B) frozen-drift audit -- every non-LoRA tensor in a trained
+checkpoint must be bitwise identical to the dtype-cast stock warm-start, and
+lora_B movement proves only the adapters trained; (C) freeze + optimizer audit
+through the REAL trainer functions (`freeze_model_parameters`,
+`verify_trainable_modules`, optimizer built exactly like
+`init_optimizer_and_scheduler`) asserting requires_grad set == intended LoRA
+set == optimizer param set; (D) per-layer merge equivalence (merged ==
+unmerged within fp tolerance; unmerge restores) -- per-layer equality implies
+whole-network equality since merge only mutates LoRALinear internals; (E)
+merged-export audit (no lora_* keys survive; export covers the stock
+architecture's keys, validating scripts/merge_lora.py output). Run against a
+trained run's checkpoint before trusting any merged artifact.
+
 ### Pilot results (r8, r16) and the +prenet ablation
 
 `latent_400` LoRA runs, 20-clip eval (10 clb->TNI, 10 rms->ASI), same pinned
