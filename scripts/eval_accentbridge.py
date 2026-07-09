@@ -50,6 +50,9 @@ def main(argv=None) -> int:
     ap.add_argument("--bridge-ckpt", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--target-speaker", default=None,
+                    help="evaluate only pairs whose target speaker matches "
+                         "(match this to the bridge's training filter)")
     ap.add_argument("--synthesize", type=int, default=0,
                     help="also render N val pairs to wav through X-VC + bridge")
     ap.add_argument("--config", default=None, help="X-VC config (for --synthesize)")
@@ -69,7 +72,7 @@ def main(argv=None) -> int:
     print(f"[bridge] {bridge.extra_repr()}")
 
     from train_accentbridge import load_pairs  # same shard reader
-    items = load_pairs(Path(args.val_dir), args.limit)
+    items = load_pairs(Path(args.val_dir), args.limit, args.target_speaker)
     if not items:
         raise SystemExit("[error] no val pairs")
 

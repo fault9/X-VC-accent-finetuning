@@ -38,13 +38,21 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 
 
-def load_pairs(pairs_dir: Path, limit=None):
+def load_pairs(pairs_dir: Path, limit=None, target_speaker=None, exclude_sources=None):
+    """Load shard items; optionally keep one persona's pairs and/or hold out
+    native source speakers (for unseen-source generalization checks)."""
     import torch
     items = []
     for s in sorted(pairs_dir.glob("shard_*.pt")):
-        items.extend(torch.load(s, map_location="cpu"))
-        if limit and len(items) >= limit:
-            return items[:limit]
+        for it in torch.load(s, map_location="cpu"):
+            m = it["meta"]
+            if target_speaker and target_speaker not in m["target_speaker"]:
+                continue
+            if exclude_sources and m["source_speaker"] in exclude_sources:
+                continue
+            items.append(it)
+            if limit and len(items) >= limit:
+                return items
     return items
 
 
@@ -109,6 +117,13 @@ def main(argv=None) -> int:
     ap.add_argument("--lambda-id", type=float, default=0.5)
     ap.add_argument("--lambda-smooth", type=float, default=0.1)
     ap.add_argument("--limit", type=int, default=None, help="cap train pairs (smoke)")
+    ap.add_argument("--target-speaker", default=None,
+                    help="train a per-persona bridge: keep only pairs whose "
+                         "target speaker matches (e.g. TNI or ASI)")
+    ap.add_argument("--exclude-sources", default=None,
+                    help="comma list of native source speakers to HOLD OUT of "
+                         "training (e.g. 'clb' -> validate unseen-source "
+                         "generalization on clb pairs)")
     ap.add_argument("--val-every", type=int, default=200)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--device", default="cuda")
@@ -124,8 +139,10 @@ def main(argv=None) -> int:
     device = torch.device(args.device if torch.cuda.is_available()
                           or args.device == "cpu" else "cpu")
 
-    train_items = load_pairs(Path(args.train_dir), args.limit)
-    val_items = load_pairs(Path(args.val_dir), None)
+    excl = set(args.exclude_sources.split(",")) if args.exclude_sources else None
+    train_items = load_pairs(Path(args.train_dir), args.limit,
+                             args.target_speaker, excl)
+    val_items = load_pairs(Path(args.val_dir), None, args.target_speaker)
     if not train_items or not val_items:
         raise SystemExit("[error] empty train or val pair set")
     dim = train_items[0]["sem_adapted_tgt"].shape[0]
