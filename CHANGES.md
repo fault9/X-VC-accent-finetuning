@@ -929,6 +929,12 @@ merged-export audit (no lora_* keys survive; export covers the stock
 architecture's keys, validating scripts/merge_lora.py output). Run against a
 trained run's checkpoint before trusting any merged artifact.
 
+**Result (run against the trained +prenet r8 checkpoint): all five checks
+passed** -- 101 intended layers injected, frozen base bitwise unchanged,
+optimizer holds only adapter tensors, adapters demonstrably trained, merged ==
+unmerged. The LoRA results are valid; the accent-vs-artifact limitation is a
+property of the objective/representation, not an implementation bug.
+
 ### Pilot results (r8, r16) and the +prenet ablation
 
 `latent_400` LoRA runs, 20-clip eval (10 clb->TNI, 10 rms->ASI), same pinned
@@ -1014,6 +1020,46 @@ references as the full-FT runs (base rows identical across runs):
   another method -- word-tier already failed); both high -> move to
   objective/feature-matching fixes (e.g. adversarial term is off in all
   fine-tunes); identity itself low -> inspect the latent-training round trip.
+
+## Eval contamination (found 2026-07-09)
+
+The evals collected so far did NOT use the designed held-out sources. The
+pipeline reserves ARCTIC prompts `b0002-b0012` as eval content
+(`build_crosspairs.py` subtracts `EVAL_PROMPTS` from every cross-pair dataset;
+verified: zero such rows in the built manifests), and `data/eval_sources` was
+originally pinned to exactly those clb/rms clips. The eval runs actually used
+**a-prompt clips**. Verified against the dtw-era pair pool: **all 20
+actually-used eval sources overlap training on both axes** -- same
+speaker+prompt as a training source, and the prompt's L2 rendition as a
+training target. `crosspair_hindi_latent_400` (400-pair subset of that pool)
+is expected to be PARTIALLY contaminated (~2/10 source-side, ~4/10 target-side
+per eval speaker by chance); exact list needs one command against the
+container manifests. Separately: all four CMU voices (clb/rms/bdl/slt) are
+training source speakers, so even the reserved-prompt eval is seen-speaker --
+the evaluation plan itself says "not final unseen-speaker evaluation".
+
+Impact: the bias is inflationary (contamination makes accent/sim look BETTER),
+so the negative conclusions -- accent-vs-artifact frontier, MOS gap -- hold a
+fortiori, and cross-run rankings shared the same stimulus and remain valid.
+What IS suspect: absolute accent counts (e.g. "7/20 indian"), and there is a
+concrete risk that the indian flips concentrate on in-train prompts (memorized
+renditions), which would mean fine-tuning generalized even less than reported.
+
+Tools added:
+
+- `scripts/check_eval_overlap.py` -- hard preflight gate, now wired into
+  `run_guarded_train_eval.sh`: any eval source clip whose prompt was trained on
+  (source- or target-side) fails the run before GPU time is spent.
+- `scripts/split_eval_by_contamination.py` -- retroactive repair: re-reads the
+  per-clip CSVs of every collected run, flags rows clean/contaminated against a
+  train manifest, and re-aggregates (n / indian / MOS / sim / WER per step and
+  class). Zero GPU. Run it over all `exp/*/eval_compare/*.csv` with the
+  latent_400 train manifest to re-read every table in this file.
+
+Going forward: restore `data/eval_sources` to the reserved `b0002-b0012` clips
+(or rebuild from prompts the gate accepts). Tables produced after the switch
+are a NEW stimulus definition and must not be compared against earlier ones.
+The final PersonaPlex gate additionally needs unseen-SPEAKER sources.
 
 ---
 

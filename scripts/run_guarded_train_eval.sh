@@ -237,6 +237,16 @@ if [[ "$run_train" -eq 1 && "$accent" == crosspair_* ]]; then
     --min-duration "$validate_min_duration"
 fi
 
+# Eval sources must be held-out content: fail if any eval clip's prompt was
+# trained on (as source or target side). See scripts/check_eval_overlap.py.
+if [[ "$run_eval" -eq 1 && -n "$accent" && -f "data/${accent}/manifests/train.jsonl" ]]; then
+  echo ""
+  echo "=== preflight eval-source contamination check ==="
+  python scripts/check_eval_overlap.py \
+    --source-dir "$source_dir" \
+    --train-manifest "data/${accent}/manifests/train.jsonl"
+fi
+
 if [[ "$run_train" -eq 1 ]]; then
   train_cmd=(
     env "XVC_VALIDATE_MIN_DURATION=${validate_min_duration}"
