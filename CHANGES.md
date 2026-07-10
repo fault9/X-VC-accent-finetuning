@@ -1117,8 +1117,14 @@ only (r2 shown -- substitute the winner), generate 5e-5 / 2e-4:
 Sequential r1 -> r2 -> r4 through the guarded runner (CUDA preflight,
 crosspair validation, contamination gate per arm); eval steps
 100,200,400,600,800,1000; `--validate_min_duration 3.0`; default
-gender-matched plan (clb -> TNI, rms -> ASI -- same tables as the r8/r16
-history, so rows are directly comparable). Outputs land under
+gender-matched plan (clb -> TNI, rms -> ASI). Eval sources are the RESERVED
+held-out prompts (`data/eval_sources_reserved`, arctic b0002-b0012) -- the
+old `data/eval_sources` dir is the pre-2026-07-09 contaminated set and the
+gate rejects it. Comparability: rows line up with the distill-era tables
+(base MOS 3.6596, labels {us:18, england:2}), NOT with the original r8/r16
+tables, which were measured on the contaminated sources; for a fair r8 row,
+re-eval its checkpoints on the reserved set (`--eval_only` after moving the
+old `eval_compare` aside). Outputs land under
 `exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r{1,2,4}_alpha16/`.
 `RANKS="2 4" bash scripts/run_lowrank_lora_sweep.sh` resumes a partial sweep.
 

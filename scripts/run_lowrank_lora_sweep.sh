@@ -22,11 +22,15 @@ cd "$script_dir/.."
 ranks="${RANKS:-1 2 4}"
 steps="${STEPS:-100,200,400,600,800,1000}"
 accent="crosspair_hindi_latent_400"
+# Reserved held-out prompts (arctic b0002-b0012), NOT the runner default
+# data/eval_sources: that dir is the pre-2026-07-09 eval set whose prompts
+# overlap latent_400 training -- the contamination gate rightly rejects it.
+source_dir="${SOURCE_DIR:-data/eval_sources_reserved}"
 
 # Fail fast on sample-rate drift in the eval dirs (dataset-side rates are
 # already enforced by validate_crosspairs inside the guarded runner; consumers
 # would silently resample -- we want drift loud, not silent).
-python scripts/check_sample_rates.py --dirs data/eval_sources data/eval_targets --expect 16000
+python scripts/check_sample_rates.py --dirs "$source_dir" data/eval_targets --expect 16000
 
 for r in $ranks; do
   name="finetune_crosspair_hindi_latent_400_lora_acoustic_r${r}_alpha16"
@@ -41,6 +45,7 @@ for r in $ranks; do
     --accent "$accent" \
     --config "configs/${name}.yaml" \
     --log_dir "exp/${name}" \
+    --source_dir "$source_dir" \
     --validate_min_duration 3.0 \
     --steps "$steps"
 done
