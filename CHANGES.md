@@ -1021,6 +1021,144 @@ references as the full-FT runs (base rows identical across runs):
   objective/feature-matching fixes (e.g. adversarial term is off in all
   fine-tunes); identity itself low -> inspect the latent-training round trip.
 
+## Target-conditioned low-rank LoRA sweep (2026-07-10, supervisor feedback)
+
+Branch: `target-conditioned-lowrank-lora`. New arms responding to supervisor
+review; nothing here changes existing configs or their behaviour.
+
+### Deployment framing: source speakers are content carriers
+
+At serving time (Hear-Me-Out / PersonaPlex) the SOURCE speaker is unknown --
+any user can be assigned the persona. The L1-ARCTIC sources (clb/rms) in the
+cross-pair data must therefore be treated as generic content carriers for
+supervision, never as speakers to specialize to. The adaptation we want is
+target/accent-conditioned: given the accented reference (frame stream) and the
+speaker embedding (global condition), render ANY source's content with the
+accent. Three practical consequences:
+
+- Overfitting to clb/rms-/pair-specific detail is a real failure mode with
+  ~20-40 min of paired data, and a plausible contributor to the r8
+  metallicness (full FT on latent_800_strict strengthened accent but went
+  robotic with WER damage; distill/self-refinement improved MOS but weakened
+  measured accent). Rank is the one regularization knob not yet swept
+  DOWNWARD: r1/r2/r4 test whether a heavily rank-limited delta keeps the broad
+  accent transform while lacking capacity for source-specific artifact detail.
+- The framing stays per-ACCENT (accents and gender, not gender alone): these
+  are Hindi-accent adapters; voice/gender is supplied by the reference clip at
+  inference (Option 4 note above), and the sweep evaluates both personas via
+  the standard gender-matched plan.
+- The PROOF of "no source specialization" is an unseen-source eval (e.g.
+  bdl/slt clips) -- still pending, flagged again here. Held-out prompts from
+  the same two source speakers cannot show it.
+
+### Where target conditioning enters acoustic_converter (audit)
+
+Two entry points (`models/codec/sac/modules/acoustic_converter.py`):
+
+1. Frame-level reference stream `c`: embedded by `input_embed.linear_cond`,
+   then per block the context-side attention projections `attn.to_q_c` /
+   `attn.to_k_c` / `attn.to_v_c` (+ `attn.to_out_c` in non-final blocks) and
+   the context FFN `ff_c.ff`.
+2. Utterance-level `speaker_condition`: the AdaLN modulation linears --
+   `attn_norm_x.` (AdaLayerNormZero per block, modulates the x stream FROM the
+   speaker condition) and the final `norm_out.` (AdaLayerNormZeroFinal).
+
+So a conditioning-side-ONLY include set IS cleanly expressible with the
+existing substring filters, no code change:
+
+    include: ["attn.to_q_c", "attn.to_k_c", "attn.to_v_c", "attn.to_out_c",
+              "ff_c.ff", "attn_norm_x.", "norm_out.", "linear_cond"]
+
+(Substring gotchas: "attn.to_k" would ALSO match `to_k_c`, so the `_c`-suffixed
+patterns are what isolates the context side; "attn.to_out_c" does not match the
+x-side `attn.to_out.0`.)
+
+Why the sweep does NOT default to it: the x-stream path (`to_q/to_k/to_v`,
+`to_out.0`, `ff_x`) is where segmental pronunciation-transform capacity lives,
+and the PATH C AdaLN arm already showed conditioning-side modulation alone
+cannot do phone substitution. Adapting the x stream is not source
+specialization -- those weights are shared across all sources; specialization
+only arises by overfit, which is exactly what low rank + the recon anchor
+guard against and what the unseen-source eval must verify. The sweep keeps the
+proven converter set `["attn.", "ff_x.ff", "ff_c.ff"]` (which already adapts
+the c-stream projections and `ff_c` -- the target-conditioning path is in);
+the conditioning-only subset above is the documented follow-up if even r1
+still shows source-overfit artifacts.
+
+### The arms
+
+| config | r | scaling (alpha 16) | batch | lr |
+|---|---|---|---|---|
+| `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r1_alpha16.yaml` | 1 | 16 | 4 | 1e-4 |
+| `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16.yaml` | 2 | 8 | 4 | 1e-4 |
+| `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r4_alpha16.yaml` | 4 | 4 | 4 | 1e-4 |
+
+Identical to the r8 pilot otherwise: `crosspair_hindi_latent_400`, recon
+anchor 0.2, `latent_alignment: true`, total_step 1000, acoustic_converter-only
+host. Note alpha is FIXED at 16, so effective scaling alpha/r grows as rank
+drops (r8 was 2.0) -- if a low rank trains unstably, lower lr before touching
+alpha. Two knobs move vs the r8 history (rank AND batch 8 -> 4, both from the
+same suggestion); if a strict rank-only comparison is ever needed, regenerate
+r8 at batch 4:
+
+    sed 's/batch_size: 8/batch_size: 4/' configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml > configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r8_b4.yaml
+
+LR variants are NOT pre-created (no config explosion). For the winning rank
+only (r2 shown -- substitute the winner), generate 5e-5 / 2e-4:
+
+    sed 's/lr: 0.0001/lr: 0.00005/' configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16_lr5e-5.yaml
+
+    sed 's/lr: 0.0001/lr: 0.0002/' configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16_lr2e-4.yaml
+
+### How to run (container)
+
+    bash scripts/run_lowrank_lora_sweep.sh
+
+Sequential r1 -> r2 -> r4 through the guarded runner (CUDA preflight,
+crosspair validation, contamination gate per arm); eval steps
+100,200,400,600,800,1000; `--validate_min_duration 3.0`; default
+gender-matched plan (clb -> TNI, rms -> ASI -- same tables as the r8/r16
+history, so rows are directly comparable). Outputs land under
+`exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r{1,2,4}_alpha16/`.
+`RANKS="2 4" bash scripts/run_lowrank_lora_sweep.sh` resumes a partial sweep.
+
+### Sample-rate consistency
+
+Everything that consumes audio resamples to the model rate on load
+(`utils/audio.py:load_audio`, soxr VHQ): the training dataloader loads source,
+target, AND reference through it, and `eval_checkpoints.py` loads eval sources
+and pinned references the same way. `validate_crosspairs.py` additionally
+hard-fails any dataset wav (source/target/raw/reference) that is not 16 kHz.
+The one surface that was only counted, never rate-checked, was the eval
+source/target dirs: `scripts/check_sample_rates.py` (new) asserts every wav in
+the given dirs is mono at the expected rate, and the sweep runner calls it
+before touching the GPU. A mismatch there was silently tolerated before
+(resampled on load), not wrong -- the check just makes rate drift loud.
+
+### Evaluation guidance for this sweep
+
+Priority order: (1) MOS/naturalness, (2) WER/intelligibility, (3) human
+listening for accent, (4) accent classifier ONLY as a noisy proxy (the
+calibration section: genuine L2 speech reaches indian_frac just 0.94/0.76 and
+the classifier reads much Hindi-English as 'england'). Read the per-clip
+`metrics.csv`, not only `summary.csv`.
+
+Two explicit questions this sweep must answer:
+
+- **Metallicness**: at matched steps, do r1/r2/r4 hold closer to base MOS
+  (3.66) than r8 and full FT did? Listen to `samples/600` of the SAME clip
+  across ranks -- the artifact is audible before it is measurable.
+- **Accent survival**: does ANY accent movement survive at r1? Check the
+  accent-label shift (base is {us:18, england:2}; movement toward
+  england/indian is signal) AND listen.
+
+Stop rule: if by step 600-1000 the accent labels sit at the base distribution
+and listening confirms no accent, do not extend the run -- that rank is below
+the accent-capacity floor; escalate rank (or try the conditioning-only subset)
+rather than train longer. Conversely, if accent moves but MOS falls toward
+full-FT levels (~2.4), the low-rank regularization hypothesis is falsified at
+that rank.
+
 ## Eval contamination (found 2026-07-09)
 
 The evals collected so far did NOT use the designed held-out sources. The
