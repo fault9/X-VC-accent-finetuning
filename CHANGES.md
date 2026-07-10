@@ -1202,6 +1202,30 @@ plan (`--eval_only` after `mv`-ing its old eval_compare aside).
 
     python scripts/compare_sweep_evals.py exp/run_a exp/run_b exp/run_c
 
+### LR leg result (2026-07-10): the window exists -> self-distill stage
+
+Halving the LR (r1/r4 at 5e-5) reproduced the same collapse trajectory at
+half speed -- no frontier shift at the bottom -- BUT sampled the acquisition
+phase properly for the first time. **r4 alpha16 lr5e-5 @ step 100 is the best
+accent-at-quality point of any arm to date**: MOS 3.356 (base 3.601), sim
+0.731 (ABOVE base 0.657), WER 0.028, accent labels england 10/20 vs base
+2/20 ('england' is the classifier's known reading of mild Hindi-English;
+'indian' labels still only appear below ~2.1 MOS). Ear check: audible accent
+with some residual metallicness. r1@5e-5 step 100 is similar on MOS/sim
+(3.33/0.734).
+
+That checkpoint becomes the TEACHER for a self-distill stage --
+`scripts/make_selfdistill_dataset.py` renders a fine-tuned checkpoint (LoRA
+topology from its config, checkpoint from `<run>/ckpt/<step>.pt`) over the
+native distill sources into same-timeline pairs, exactly the
+make_distill_dataset.py format (reserved prompts excluded, same split seed).
+Student config `configs/finetune_selfdistill_hindi_asi_lora_r8.yaml` is ONE
+knob (the teacher data) vs `finetune_distill_hindi_asi_lora_r8.yaml`, so
+student quality differences attribute to teacher quality. GATE the teacher
+renders (classifier one-liner + ears on `data/selfdistill_hindi_asi/wavs`)
+before spending the student run; the student cannot exceed its targets --
+the bet is only that it smooths part of the residual metallicness.
+
 ## Eval contamination (found 2026-07-09)
 
 The evals collected so far did NOT use the designed held-out sources. The
