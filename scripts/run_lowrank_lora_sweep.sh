@@ -30,6 +30,9 @@ python scripts/check_sample_rates.py --dirs data/eval_sources data/eval_targets 
 
 for r in $ranks; do
   name="finetune_crosspair_hindi_latent_400_lora_acoustic_r${r}_alpha16"
+  # The guarded preflight `test -d $log_dir` runs BEFORE training creates the
+  # dir, so a fresh run dies silently without this (the x1.5-arm trap).
+  mkdir -p "exp/${name}"
   echo ""
   echo "############################################################"
   echo "### low-rank sweep arm r=${r}  ->  exp/${name}"
