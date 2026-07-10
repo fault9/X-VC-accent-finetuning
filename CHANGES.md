@@ -1043,10 +1043,15 @@ accent. Three practical consequences:
   measured accent). Rank is the one regularization knob not yet swept
   DOWNWARD: r1/r2/r4 test whether a heavily rank-limited delta keeps the broad
   accent transform while lacking capacity for source-specific artifact detail.
-- The framing stays per-ACCENT (accents and gender, not gender alone): these
-  are Hindi-accent adapters; voice/gender is supplied by the reference clip at
-  inference (Option 4 note above), and the sweep evaluates both personas via
-  the standard gender-matched plan.
+- PERSONA MODE (project decision, carried over from the distill arms): one
+  LoRA per accent x gender persona, trained and evaluated one at a time. This
+  sweep trains the ASI (Hindi male) adapter on the ASI-filtered pairs
+  (`data/crosspair_hindi_latent_400_asi`, ~200 train / 20 val) and evals ALL
+  20 reserved sources -> ASI (`configs/eval_hindi_native_to_asi.json`,
+  cross-gender clb->ASI included -- a real serving condition). The persona is
+  defined by accent AND gender, not gender alone. The TNI (Hindi female) twin
+  needs its filtered dataset built first (same grep recipe as _asi with
+  `"TNI__`).
 - The PROOF of "no source specialization" is an unseen-source eval (e.g.
   bdl/slt clips) -- still pending, flagged again here. Held-out prompts from
   the same two source speakers cannot show it.
@@ -1089,26 +1094,26 @@ still shows source-overfit artifacts.
 
 | config | r | scaling (alpha 16) | batch | lr |
 |---|---|---|---|---|
-| `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r1_alpha16.yaml` | 1 | 16 | 4 | 1e-4 |
-| `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16.yaml` | 2 | 8 | 4 | 1e-4 |
-| `configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r4_alpha16.yaml` | 4 | 4 | 4 | 1e-4 |
+| `configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r1_alpha16.yaml` | 1 | 16 | 4 | 1e-4 |
+| `configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r2_alpha16.yaml` | 2 | 8 | 4 | 1e-4 |
+| `configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16.yaml` | 4 | 4 | 4 | 1e-4 |
 
-Identical to the r8 pilot otherwise: `crosspair_hindi_latent_400`, recon
-anchor 0.2, `latent_alignment: true`, total_step 1000, acoustic_converter-only
-host. Note alpha is FIXED at 16, so effective scaling alpha/r grows as rank
-drops (r8 was 2.0) -- if a low rank trains unstably, lower lr before touching
-alpha. Two knobs move vs the r8 history (rank AND batch 8 -> 4, both from the
-same suggestion); if a strict rank-only comparison is ever needed, regenerate
-r8 at batch 4:
+Same recipe as the r8 pilot otherwise: recon anchor 0.2,
+`latent_alignment: true`, total_step 1000, acoustic_converter-only host --
+but on the ASI persona subset. Note alpha is FIXED at 16, so effective
+scaling alpha/r grows as rank drops (r8 was 2.0) -- if a low rank trains
+unstably, lower lr before touching alpha. Three knobs differ vs the original
+r8 run (rank, batch 8 -> 4, ASI-only data); for an in-family r8 reference at
+matched batch/data, regenerate from the r4 arm:
 
-    sed 's/batch_size: 8/batch_size: 4/' configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml > configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r8_b4.yaml
+    sed 's/^      r: 4$/      r: 8/' configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r8_alpha16.yaml
 
 LR variants are NOT pre-created (no config explosion). For the winning rank
 only (r2 shown -- substitute the winner), generate 5e-5 / 2e-4:
 
-    sed 's/lr: 0.0001/lr: 0.00005/' configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16_lr5e-5.yaml
+    sed 's/lr: 0.0001/lr: 0.00005/' configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r2_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r2_alpha16_lr5e-5.yaml
 
-    sed 's/lr: 0.0001/lr: 0.0002/' configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_lora_acoustic_r2_alpha16_lr2e-4.yaml
+    sed 's/lr: 0.0001/lr: 0.0002/' configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r2_alpha16.yaml > configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r2_alpha16_lr2e-4.yaml
 
 ### How to run (container)
 
@@ -1116,16 +1121,16 @@ only (r2 shown -- substitute the winner), generate 5e-5 / 2e-4:
 
 Sequential r1 -> r2 -> r4 through the guarded runner (CUDA preflight,
 crosspair validation, contamination gate per arm); eval steps
-100,200,400,600,800,1000; `--validate_min_duration 3.0`; default
-gender-matched plan (clb -> TNI, rms -> ASI). Eval sources are the RESERVED
-held-out prompts (`data/eval_sources_reserved`, arctic b0002-b0012) -- the
-old `data/eval_sources` dir is the pre-2026-07-09 contaminated set and the
-gate rejects it. Comparability: rows line up with the distill-era tables
-(base MOS 3.6596, labels {us:18, england:2}), NOT with the original r8/r16
-tables, which were measured on the contaminated sources; for a fair r8 row,
-re-eval its checkpoints on the reserved set (`--eval_only` after moving the
-old `eval_compare` aside). Outputs land under
-`exp/finetune_crosspair_hindi_latent_400_lora_acoustic_r{1,2,4}_alpha16/`.
+100,200,400,600,800,1000; `--validate_min_duration 3.0`; persona-mode plan
+`configs/eval_hindi_native_to_asi.json` (all 20 sources -> ASI). Eval sources
+are the RESERVED held-out prompts (`data/eval_sources_reserved`, arctic
+b0002-b0012) -- the old `data/eval_sources` dir is the pre-2026-07-09
+contaminated set and the gate rejects it. Comparability: every eval includes
+the base checkpoint as a same-plan reference row, and rows line up with the
+ASI-plan re-evals of the distill arms; do NOT compare against the original
+r8/r16 tables (contaminated sources, gender-matched plan) or the distill-era
+mixed-plan tables (base 3.6596 there included clb->TNI rows). Outputs land
+under `exp/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r{1,2,4}_alpha16/`.
 `RANKS="2 4" bash scripts/run_lowrank_lora_sweep.sh` resumes a partial sweep.
 
 ### Sample-rate consistency
@@ -1151,12 +1156,14 @@ the classifier reads much Hindi-English as 'england'). Read the per-clip
 
 Two explicit questions this sweep must answer:
 
-- **Metallicness**: at matched steps, do r1/r2/r4 hold closer to base MOS
-  (3.66) than r8 and full FT did? Listen to `samples/600` of the SAME clip
-  across ranks -- the artifact is audible before it is measurable.
-- **Accent survival**: does ANY accent movement survive at r1? Check the
-  accent-label shift (base is {us:18, england:2}; movement toward
-  england/indian is signal) AND listen.
+- **Metallicness**: at matched steps, do r1/r2/r4 hold closer to the base row
+  (same run, same ASI plan) than r8 and full FT did? Listen to `samples/600`
+  of the SAME clip across ranks -- the artifact is audible before it is
+  measurable.
+- **Accent survival**: does ANY accent movement survive at r1? Compare the
+  accent-label distribution against the same-run base row (under the mixed
+  plan base was {us:18, england:2}; movement toward england/indian is signal)
+  AND listen.
 
 Stop rule: if by step 600-1000 the accent labels sit at the base distribution
 and listening confirms no accent, do not extend the run -- that rank is below

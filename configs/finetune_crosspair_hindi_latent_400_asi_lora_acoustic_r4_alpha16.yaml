@@ -1,30 +1,32 @@
-# Target-conditioned LOW-RANK sweep (supervisor feedback, 2026-07-10) -- rank 2
-# of the r1/r2/r4 arm set (alpha fixed at 16, batch 4, lr 1e-4). Motivation:
-# deployment sources are unknown, so the L1-ARCTIC sources are generic CONTENT
-# CARRIERS -- the adapter must generalize across sources and behave as
-# target/accent-conditioned adaptation, not source specialization. With ~20-40
-# min of pairs, r8/r16 have capacity to overfit source-/pair-specific detail
-# (a plausible driver of the metallicness); a heavily rank-limited delta can
-# only keep the broadest accent transform. See CHANGES.md "Target-conditioned
+# PERSONA-MODE low-rank sweep (supervisor feedback, 2026-07-10) -- rank 4 of
+# the r1/r2/r4 arm set (alpha fixed at 16, batch 4, lr 1e-4). One LoRA per
+# accent x gender persona: this trains the ASI (Hindi male) adapter on the
+# ASI-filtered latent_400 pairs (~200 train / 20 val). Deployment sources are
+# unknown, so the L1-ARCTIC sources are generic CONTENT CARRIERS -- the
+# adapter must generalize across sources and behave as target/accent-
+# conditioned adaptation, not source specialization. With this little paired
+# data, r8/r16 have capacity to overfit source-/pair-specific detail (a
+# plausible driver of the metallicness); a heavily rank-limited delta can only
+# keep the broadest accent transform. See CHANGES.md "Target-conditioned
 # low-rank LoRA sweep".
 #
-# Deltas vs finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml: r 8 -> 2
-# and batch 8 -> 4; data, recon anchor, target set, total_step, lr unchanged.
-# NOTE alpha fixed at 16 means scaling alpha/r = 8 (r8 was 2.0): per-direction
-# updates are amplified as rank drops. If this rank trains unstably, lower lr
-# (5e-5) before touching alpha.
+# Deltas vs finetune_crosspair_hindi_latent_400_lora_acoustic_r8.yaml: r 8 -> 4,
+# batch 8 -> 4, and ASI-only persona data (the r8 pilot trained on the shared
+# two-persona set). NOTE alpha fixed at 16 means scaling alpha/r = 4 (r8 was
+# 2.0): per-direction updates are amplified as rank drops. If this rank trains
+# unstably, lower lr (5e-5) before touching alpha.
 
 base_config: configs/xvc.yaml
 reference_duration: 3.0
 
 datasets:
   train:
-    - data/crosspair_hindi_latent_400/manifests/train.jsonl
+    - data/crosspair_hindi_latent_400_asi/manifests/train.jsonl
   val:
-    - data/crosspair_hindi_latent_400/manifests/val.jsonl
+    - data/crosspair_hindi_latent_400_asi/manifests/val.jsonl
 
 dataloader:
-  reconstruction_ratio: 0.2     # 80% native->Hindi accent pressure, 20% clean anchor
+  reconstruction_ratio: 0.2     # 80% native->ASI accent pressure, 20% clean anchor
   reversed_ratio: 0.0
   mask_target_condition: true
   latent_alignment: true        # training-only DTW map; waveforms stay pristine
@@ -49,8 +51,8 @@ model:
     trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
     lora:
       enabled: true
-      r: 2
-      alpha: 16                 # scaling = alpha/r = 8
+      r: 4
+      alpha: 16                 # scaling = alpha/r = 4
       dropout: 0.0
       target_modules: [acoustic_converter]    # defaults to trainable_modules if omitted
       # Same proven converter set as r8/r16 (attention + both FFNs). "attn."

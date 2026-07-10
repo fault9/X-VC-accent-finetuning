@@ -1,0 +1,10 @@
+{
+  "purpose": "ASI persona-mode eval: ALL native sources convert to ASI (cross-gender included, matching serving where any user can be assigned this persona)",
+  "source_group": "native_english",
+  "allowed_source_speakers": ["clb", "rms"],
+  "target_group": "hindi",
+  "assignments": {
+    "clb": "ASI",
+    "rms": "ASI"
+  }
+}
