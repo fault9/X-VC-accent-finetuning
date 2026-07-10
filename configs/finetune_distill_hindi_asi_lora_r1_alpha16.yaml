@@ -1,0 +1,57 @@
+# PERSONA-MODE low-rank DISTILL arm -- rank 1. Same teacher data and target
+# set as finetune_distill_hindi_asi_lora_r8.yaml (x1.2 l0plus teacher;
+# converter attention/FFN + AdaLN + prenet pwconv -- prenet stays IN, per
+# supervisor intent). ONE knob vs that run: r 8 -> 1 (alpha stays 16, so
+# scaling alpha/r = 16; r8 was 2.0). Batch stays 8 to keep the comparison
+# clean against the known distill-r8 rows (3.29 MOS @600).
+#
+# Why: the latent-objective low-rank sweep (r1/r2 collapsed to ~1.6-1.8 MOS)
+# showed rank does not rescue THAT objective. Here the question is whether a
+# rank-limited delta on the WORKING objective (same-timeline distillation)
+# closes the remaining base-vs-student naturalness gap (3.66 -> 3.29) while
+# keeping the teacher's accent -- low rank as regularization against
+# source-/pair-specific overfit (sources are content carriers).
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/distill_hindi_asi/manifests/train.jsonl
+  val:
+    - data/distill_hindi_asi/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.1     # small identity anchor (teacher-target recon)
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: false       # plain path: same-timeline pairs, no DTW
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 2000
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    lora:
+      enabled: true
+      r: 1
+      alpha: 16                 # scaling = alpha/r = 16
+      dropout: 0.0
+      target_modules: [acoustic_converter, prenet]
+      # converter attention + FFN + AdaLN modulation, prenet pwconv:
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "attn_norm_x.", "norm_out.", "pwconv"]
+    optim_conf:
+      lr: 0.0001

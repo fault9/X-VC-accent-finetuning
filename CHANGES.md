@@ -1172,6 +1172,36 @@ rather than train longer. Conversely, if accent moves but MOS falls toward
 full-FT levels (~2.4), the low-rank regularization hypothesis is falsified at
 that rank.
 
+### Interim result (2026-07-10) + low-rank DISTILL arms
+
+r1 and r2 on the latent objective both collapsed: base 3.60 -> ~3.0 @100 ->
+~2.2-2.5 @200 -> **~1.6-1.8 floor from step 400 on**, WER degrading in step.
+Halving the scaling (r2 = 8 vs r1 = 16) barely changed the trajectory, so
+this is not primarily over-drive. Combined with full FT and r8(+AdaLN) all
+collapsing on the same data, the reading is: **adapter capacity is not the
+artifact source -- the latent-alignment objective degrades naturalness at
+every size tried** (r1 -> full FT, a huge parameter span). The only setup
+that has held MOS is the distillation objective (r8 student: 3.1-3.3).
+
+Follow-up arms therefore move the rank sweep onto the distill objective,
+keeping prenet in the target set (supervisor's rank suggestion was about
+capacity, not about dropping prenet -- and the distill set already hosts
+converter+prenet+AdaLN):
+`configs/finetune_distill_hindi_asi_lora_r{1,2,4}_alpha16.yaml` -- ONE knob
+(rank) vs `finetune_distill_hindi_asi_lora_r8.yaml` (batch stays 8, recon 0.1,
+total_step 2000, x1.2 teacher data). Question: does a rank-limited delta on
+the WORKING objective close the remaining base-vs-student gap (3.66 -> 3.29)
+while keeping the teacher's accent? Run with
+`bash scripts/run_lowrank_distill_sweep.sh` (eval: ASI plan on reserved
+sources). CAVEAT: the existing distill-r8 eval_compare was produced under the
+MIXED gender-matched plan -- for like-for-like columns, re-eval it on the ASI
+plan (`--eval_only` after `mv`-ing its old eval_compare aside).
+
+`scripts/compare_sweep_evals.py` prints side-by-side per-step tables
+(MOS/WER/sim + accent-label counts) across any set of run dirs:
+
+    python scripts/compare_sweep_evals.py exp/run_a exp/run_b exp/run_c
+
 ## Eval contamination (found 2026-07-09)
 
 The evals collected so far did NOT use the designed held-out sources. The
