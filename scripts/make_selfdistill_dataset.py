@@ -57,6 +57,10 @@ def main(argv=None) -> int:
     ap.add_argument("--reference", required=True,
                     help="persona reference wav (conditioning + manifest field)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--lora-scale", type=float, default=1.0,
+                    help="multiply the teacher's LoRA delta at render time "
+                         "(>1 pushes further along the learned accent shift; "
+                         "the checkpoint's artifacts amplify with it -- gate by ear)")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--device", type=int, default=0)
@@ -87,6 +91,17 @@ def main(argv=None) -> int:
 
     cfg, model, device = load_xvc(args.config, str(ckpt_path), args.device, False)
     print(f"[teacher] {ckpt_path} (LoRA topology from {args.config})")
+    if args.lora_scale != 1.0:
+        from models.codec.sac.modules.lora import LoRALinear
+        n_scaled = 0
+        for m in model.modules():
+            if isinstance(m, LoRALinear):
+                m.scaling *= args.lora_scale
+                n_scaled += 1
+        if n_scaled == 0:
+            raise SystemExit("[error] --lora-scale set but the loaded model has "
+                             "no LoRA layers (wrong --config?)")
+        print(f"[teacher] LoRA delta scaled x{args.lora_scale:g} on {n_scaled} layers")
 
     def synth(source_path: str):
         src, tgt, tgt_cond = load_pair_as_tensors(
@@ -129,7 +144,8 @@ def main(argv=None) -> int:
             for r in rs:
                 f.write(json.dumps(r) + "\n")
     meta = {"teacher_run": str(args.run_dir), "teacher_step": args.step,
-            "teacher_config": args.config, "reference": args.reference,
+            "teacher_config": args.config, "lora_scale": args.lora_scale,
+            "reference": args.reference,
             "n_train": len(rows["train"]), "n_val": len(rows["val"]),
             "eval_prompts_excluded": sorted(EVAL_PROMPTS)}
     with open(out / "distill_meta.json", "w", encoding="utf-8") as f:
