@@ -69,9 +69,13 @@ def main(argv=None) -> int:
     from bins.infer_utils import (load_pair_as_tensors, load_xvc, run_offline,
                                   to_numpy_audio)
 
-    ckpt_path = Path(args.run_dir) / "ckpt" / f"{args.step}.pt"
-    if not ckpt_path.is_file():
-        raise SystemExit(f"[error] teacher checkpoint not found: {ckpt_path}")
+    ckpt_dir = Path(args.run_dir) / "ckpt"
+    # trainer writes zero-padded step names (000100.pt); accept both forms
+    candidates = [ckpt_dir / f"{args.step}.pt", ckpt_dir / f"{args.step:06d}.pt"]
+    ckpt_path = next((p for p in candidates if p.is_file()), None)
+    if ckpt_path is None:
+        raise SystemExit("[error] teacher checkpoint not found, tried: "
+                         + ", ".join(str(p) for p in candidates))
 
     sources = sorted(Path(p) for p in globlib.glob(args.source_glob))
     sources = [s for s in sources
