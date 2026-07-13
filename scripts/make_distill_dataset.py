@@ -45,7 +45,13 @@ def main(argv=None) -> int:
     ap.add_argument("--reference", required=True,
                     help="persona reference wav (conditioning + manifest field)")
     ap.add_argument("--config", required=True)
-    ap.add_argument("--ckpt", default="ckpts/xvc.pt")
+    ap.add_argument("--ckpt", default="ckpts/xvc.pt",
+                    help="renderer checkpoint; pass a fine-tuned LoRA ckpt "
+                         "(with its finetune config as --config) to STACK the "
+                         "bridge delta with the accented renderer")
+    ap.add_argument("--lora-scale", type=float, default=1.0,
+                    help="multiply the renderer's LoRA delta (only meaningful "
+                         "with a LoRA --ckpt/--config)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--limit", type=int, default=None)
@@ -69,6 +75,17 @@ def main(argv=None) -> int:
         raise SystemExit("[error] no source wavs (after eval-prompt exclusion)")
 
     cfg, model, device = load_xvc(args.config, args.ckpt, args.device, False)
+    if args.lora_scale != 1.0:
+        from models.codec.sac.modules.lora import LoRALinear
+        n_scaled = 0
+        for m in model.modules():
+            if isinstance(m, LoRALinear):
+                m.scaling *= args.lora_scale
+                n_scaled += 1
+        if n_scaled == 0:
+            raise SystemExit("[error] --lora-scale set but the renderer has no "
+                             "LoRA layers (pass the finetune config + ckpt)")
+        print(f"[renderer] LoRA delta scaled x{args.lora_scale:g} on {n_scaled} layers")
     ck = torch.load(args.bridge_ckpt, map_location="cpu")
     bridge = AccentBridge(**ck["config"])
     bridge.load_state_dict(ck["state_dict"])
@@ -129,6 +146,7 @@ def main(argv=None) -> int:
             for r in rs:
                 f.write(json.dumps(r) + "\n")
     meta = {"teacher": args.bridge_ckpt, "delta_scale": args.delta_scale,
+            "renderer_ckpt": args.ckpt, "renderer_lora_scale": args.lora_scale,
             "reference": args.reference, "n_train": len(rows["train"]),
             "n_val": len(rows["val"]), "eval_prompts_excluded": sorted(EVAL_PROMPTS)}
     with open(out / "distill_meta.json", "w", encoding="utf-8") as f:
