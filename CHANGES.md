@@ -1317,6 +1317,25 @@ direct-route open question -- recon_ratio > 0.2, 5x data (L2-ARCTIC has
 never varied, and any of them could make the latent objective stable enough
 to obsolete the distill stage entirely.
 
+### Diverse-input eval (2026-07-13): unseen speakers confirmed
+
+New stimulus `data/eval_sources_diverse` (ships as eval_sources_diverse.tgz;
+plan `configs/eval_diverse_to_asi.json`, source_group `diverse_unseen` --
+eval_checkpoints.py now accepts any declared source_group label): bdl/slt
+(native, seen speakers) + UNSEEN accented sources ABA (Arabic M), MBMPS
+(Spanish F), SVBI (Hindi F), 10 reserved prompts each. v2 r4 student @2000
+vs same-set base: pooled sim 0.716 -> 0.7625 (unseen speakers, near the
+0.80 ceiling), shifted labels 41/50, MOS 3.29 -> 2.99 (this input set is
+harder for the base model too), WER 0.040 -> 0.072 (the real cost, on
+accented inputs). Per speaker: ABA 9/10 shifted at sim 0.78 -- unseen-
+speaker generalization CONFIRMED; SVBI (Hindi input) 10/10 shifted incl 5
+indian -- accented input compounds rather than conflicts; MBMPS only 5/10 --
+Spanish segmental habits partially push through (input-accent interference,
+the case the diverse-carrier distill idea targets). Note: prompt b0002
+flips indian across four different sources -- accent expression is partly
+prompt-dependent. NOT comparable to reserved-set tables (different
+stimulus); the reserved eval_compare is preserved as eval_compare_reserved.
+
 ## Direct-route falsification (2026-07-13): the collapse is intrinsic
 
 The open question above was answered the same day with three arms, all on
