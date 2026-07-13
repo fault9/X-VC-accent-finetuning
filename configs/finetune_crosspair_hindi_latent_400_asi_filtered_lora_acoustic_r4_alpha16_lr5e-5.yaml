@@ -17,6 +17,10 @@
 #   for s in train val; do grep -v -F -f exclude_ids.txt \
 #     data/crosspair_hindi_latent_400_asi/manifests/$s.jsonl \
 #     > data/crosspair_hindi_latent_400_asi_filtered/manifests/$s.jsonl; done
+#   cp data/crosspair_hindi_latent_400_asi/align_meta.json \
+#     data/crosspair_hindi_latent_400_asi_filtered/
+# (align_meta.json is REQUIRED: validate_crosspairs.py reads warp_method from
+# it to apply latent-mode rules; without it the duration check fails.)
 
 base_config: configs/xvc.yaml
 reference_duration: 3.0
