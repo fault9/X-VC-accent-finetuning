@@ -1,0 +1,58 @@
+# DIRECT-ROUTE stabilization arm 3 -- PERSONA MODE ASI (Hindi M). Full-pool
+# REBUILD, audit-filtered: align_crosspairs.py over all 1,995 upstream pairs
+# (latent mode, leak-free prompt re-split), then audit_alignment_qc.py drops
+# the 41% with suspect alignments -> 170 clean ASI train / 20 val pairs.
+# Matched in SIZE to the original latent_400_asi set (~172 train, ~32% of
+# which the same audit flags), so this is a PURE alignment-quality knob --
+# no quantity confound. Compare directly against the unfiltered twin
+# (3.36 -> 3.05 -> 2.62 at 100/200/300) and the container-side 136-pair
+# filtered-subset arm. Quantity lever, if quality shows signal: rebuild at
+# --min-duration 2.6 (recovers a chunk of the 1,133 short-dropped pairs;
+# needs the reference pool kept at >= 3.0 s for reference_duration).
+#
+# ONE knob vs finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_
+# alpha16_lr5e-5.yaml: the dataset (data/crosspair_hindi_latent_full_asi,
+# shipped as crosspair_hindi_latent_full.tgz).
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_full_asi/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_full_asi/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2     # 80% native->ASI accent pressure, 20% clean anchor
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 4
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 50
+save_interval: 50               # dense checkpoints across the acquisition window
+keep_interval: 50
+total_step: 600
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
+    lora:
+      enabled: true
+      r: 4
+      alpha: 16                 # scaling = alpha/r = 4
+      dropout: 0.0
+      target_modules: [acoustic_converter]
+      include: ["attn.", "ff_x.ff", "ff_c.ff"]
+    optim_conf:
+      lr: 0.00005
