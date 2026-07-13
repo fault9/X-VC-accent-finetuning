@@ -1317,6 +1317,55 @@ direct-route open question -- recon_ratio > 0.2, 5x data (L2-ARCTIC has
 never varied, and any of them could make the latent objective stable enough
 to obsolete the distill stage entirely.
 
+## Direct-route falsification (2026-07-13): the collapse is intrinsic
+
+The open question above was answered the same day with three arms, all on
+the winning recipe (r4 alpha16 lr5e-5, converter-only, dense eval every 50
+of 600 steps), each changing exactly one data-side variable:
+
+1. **recon 0.4** (`..._r4_alpha16_lr5e-5_recon40.yaml`): doubled clean
+   anchor. Identical curve through the usable window (3.365/3.071 at
+   100/200 vs 3.356/3.048); only cushions the deep-collapse region.
+   Anchoring dilutes exposure to the warped supervision, it does not
+   neutralize it.
+2. **alignment-filtered** (`..._asi_filtered_...`): `audit_alignment_qc.py`
+   found ~32% of the training pairs alignment-suspect (global-stretch
+   outliers, heavy DTW anchor repairs, local stretch at bounds, worst-decile
+   mel distance); dropped them, 136 clean pairs. Step 100 identical to three
+   decimals (3.354/0.729/england 10 vs 3.356/0.731/england 10); same
+   collapse. The measurably-dirty third was not the poison.
+3. **wide ASI-only** (`..._wide_asionly_...`): full-pool rebuild at a 2.0 s
+   floor (references held >= 3.0 s), audit-filtered, 349 clean pairs =
+   19.2 min ASI audio (75% more than ever before; ships in
+   crosspair_hindi_latent_wide.tgz). Step 100: 3.369/0.734/england 10 --
+   again identical -- and NO acquisition-window improvement either, so the
+   teacher was never data-starved.
+
+Complete falsification chain across the project: adapter capacity (r1 ->
+full FT), LR (1e-4/5e-5), hosts (+-prenet), recon anchor (0.2/0.4),
+alignment hygiene, data volume. Every arm lands on the same curve. Reading:
+cross-speaker frame correspondence is INTRINSICALLY imperfect -- the audit
+gates remove gross violations (epenthesis, pauses, production differences),
+but the fine-grained mismatch present in every "clean" pair is the training
+signal itself. The latent objective cannot be stabilized by data work.
+
+**Consequences.** (a) The two-stage pipeline (brief latent teacher ->
+freeze the transform into same-timeline renders -> distill student) is the
+design conclusion for this architecture, not a workaround; the v2
+stack-distill r4 stands as the ASI persona. (b) The audit/rebuild tooling
+remains as permanent dataset hygiene (align_crosspairs.py now writes
+pair-unique alignment files -- source_utt alone collides once one source
+pairs with several targets -- and audit_alignment_qc.py emits pair-keyed
+exclusions; subset dirs need align_meta.json AND a matching
+alignment_qc.jsonl or validate_crosspairs.py rejects them). (c) A biased
+note for the record: the alignment gates preferentially discard the most
+strongly-accented renditions (heavy epenthesis is both "strong accent" and
+"unalignable"), and the frame-synchronous architecture cannot reproduce
+durational/rhythmic accent at all (dur_delta always 0) -- two structural
+reasons the direct route also UNDER-DELIVERS accent depth, and two more
+points for the distill stage, which needs no correspondence and inherits
+whatever the teacher renders.
+
 ## Eval contamination (found 2026-07-09)
 
 The evals collected so far did NOT use the designed held-out sources. The
