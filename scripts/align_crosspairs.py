@@ -625,6 +625,10 @@ def main() -> int:
     )
     ap.add_argument("--min-duration", type=float, default=3.0,
                     help="require both raw recordings to be at least this long")
+    ap.add_argument("--min-reference-duration", type=float, default=None,
+                    help="minimum duration for target REFERENCE clips (defaults "
+                         "to --min-duration; keep >= the configs' "
+                         "reference_duration when lowering --min-duration)")
     ap.add_argument("--min-global-stretch", type=float, default=0.85,
                     help="minimum source/raw-target duration ratio")
     ap.add_argument("--max-global-stretch", type=float, default=1.20,
@@ -657,6 +661,9 @@ def main() -> int:
 
     if args.warp_side == "source" and args.warp_method != "rubberband":
         ap.error("--warp-side source currently requires --warp-method rubberband")
+    reference_minimum = (args.min_reference_duration
+                         if args.min_reference_duration is not None
+                         else args.min_duration)
 
     out = Path(args.out)
     source_root = Path(args.source_root)
@@ -887,7 +894,7 @@ def main() -> int:
             if not raw_tgt_out.exists():
                 shutil.copyfile(raw_tgt_path, raw_tgt_out)
             reference = clean_reference_path(
-                r, l2_root, reference_pools, args.min_duration,
+                r, l2_root, reference_pools, reference_minimum,
                 forbidden_reference_prompts,
             )
             ref_out = out / "wavs" / "ref" / f"{reference.parent.parent.name}_{reference.name}"
