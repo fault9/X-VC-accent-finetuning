@@ -1,0 +1,65 @@
+# PRENET-INCLUDED TEACHER ARM -- PERSONA MODE ASI (Hindi M). Escalation of the
+# winning latent arm (r4 alpha16 lr5e-5, converter-only) after the self-distill
+# round proved the pipeline but exposed the teacher as the accent-depth
+# bottleneck: the converter-only teacher tops out at a mild "england" shift,
+# and no student can exceed its teacher. Hypothesis: segmental realization
+# (what makes the accent read as distinctly Indian) needs adaptation BEFORE
+# the converter -- prenet shapes the combined semantic+acoustic stream, so
+# giving it LoRA lets the accent move phone realization, not just the
+# converter's rendering of it.
+#
+# ONE knob vs finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_
+# lr5e-5.yaml: prenet joins the LoRA hosts ("pwconv" = its ConvNeXt pointwise
+# linears). Same data, objective, lr, batch, rank. Denser save cadence (50) and
+# total_step 600 only change what we OBSERVE: every prior arm's usable window
+# was step <=200 and everything past 600 was deep in the naturalness collapse,
+# so we sample the acquisition window finely instead of training past it.
+# Risk (accepted): more adaptable surface under the latent objective may
+# collapse naturalness FASTER -- early-stop discipline + the proven
+# self-distill smoothing stage is the mitigation. Gate by ear at 50-200.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400_asi/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400_asi/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2     # 80% native->ASI accent pressure, 20% clean anchor
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 4               # matches the converter-only r4 lr5e-5 arm
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 50
+save_interval: 50               # dense checkpoints across the acquisition window
+keep_interval: 50
+total_step: 600
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    lora:
+      enabled: true
+      r: 4
+      alpha: 16                 # scaling = alpha/r = 4
+      dropout: 0.0
+      target_modules: [acoustic_converter, prenet]
+      # Converter set unchanged from the r4 lr5e-5 arm; "pwconv" adds prenet's
+      # ConvNeXt pointwise linears (pwconv1/pwconv2). Prenet's condition_proj
+      # stays base -- we adapt the content stream, not the speaker injection.
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "pwconv"]
+    optim_conf:
+      lr: 0.00005
