@@ -1226,6 +1226,97 @@ renders (classifier one-liner + ears on `data/selfdistill_hindi_asi/wavs`)
 before spending the student run; the student cannot exceed its targets --
 the bet is only that it smooths part of the residual metallicness.
 
+## Stack-distill: the ASI persona pipeline (2026-07-13)
+
+### Self-distill v1: the repair stage works, the teacher was the ceiling
+
+The r8 student on the r4@100-lr5e-5 teacher renders (teacher gate: england
+126/us 95 over 221 clips, MOS 3.288) came out **flat for all 2000 steps**:
+MOS 3.40-3.45 (ABOVE its teacher), sim 0.72-0.73, WER back at base (0.017),
+england 8-10/20 at every checkpoint. Distillation demonstrably preserves the
+teacher's accent, repairs ~+0.1 MOS of texture, and does not drift -- but it
+cannot deepen accent, and the v1 persona sounded "ok but not very indian"
+(ears). Every fix is therefore teacher-side.
+
+### Teacher probes: the frontier, and what broke it
+
+`scripts/gate_teacher_renders.py` + `scripts/probe_*.sh` render 40-clip
+probes (same first-40 sources everywhere, deterministic) and gate them with
+classifier label counts + MOS mean/floor; ears remain the final gate. The
+`--lora-scale` knob on both dataset renderers multiplies a loaded LoRA delta
+at render time. Findings, in order:
+
+- **Amplifying the early delta buys accent linearly with MOS** (r1@100:
+  indian 1->2->5->10->17 of 40 as scale goes 2.0->3.0 and MOS 2.92->2.34;
+  r4 the same but a gentler slope -- r4@100 x3.0 = indian 12/40 @ 2.60 was
+  the converter-side frontier point). Rank-1-expressibility confirmed
+  constructively: the accent is one direction; scaling walks along it.
+- **More training adds damage, not depth**: r4@300/600 renders LOST shifted
+  labels while MOS collapsed (2.60/2.07). The direction is in place by step
+  100; everything after is objective damage.
+- **A prenet-included latent teacher arm does not break the frontier**
+  (`..._prenet_r4_alpha16_lr5e-5.yaml`, 600 steps, dense eval every 50):
+  same curve as converter-only (3.32@100 vs 3.36), slightly better early sim
+  (0.741), first usable-quality indian blip at step 150 (1/20 @ arm MOS
+  3.17), same collapse. Under this objective, extra surface is spent the
+  same way.
+- **The AccentBridge alone is dominated everywhere**: through stock X-VC its
+  renders are us-majority at x1.2 (us 23/40, MOS 2.69) and collapse at
+  x1.5/2.0 (2.10/1.54) -- but by EAR the x1.5 renders were the most Indian
+  of anything to date ("very choppy and noisy"). The classifier (acoustic
+  ECAPA) systematically undercounts the bridge's SEGMENTAL shift; ears
+  outrank it, per the standing eval guidance.
+- **The stack breaks the frontier**: bridge x1.0 rendered THROUGH the
+  accented LoRA checkpoint (`make_distill_dataset.py --ckpt <lora ckpt>
+  --config <its finetune config>`) = 32/40 shifted incl 3 indian at MOS
+  3.02 (ears: clearly more Indian than the v1 teacher). The accented
+  renderer renders bridge-edited features BETTER than stock (+0.17 MOS at
+  bridge x1.5). Segments from the bridge + rendering from the LoRA, neither
+  pushed to its breaking point.
+- Rendering the bridge through the v1 STUDENT is cleaner still (3.09-3.22
+  at matched scales) but shallower by ear; the l10 stack won on accent.
+
+### Stack-distill v2 (the ASI persona candidate)
+
+Teacher: bridge x1.0 + r4@100-lr5e-5 renderer -> `data/stackdistill_hindi_asi_l10`.
+Students: `finetune_stackdistill_hindi_asi_l10_lora_r8.yaml` and the
+`_r4_alpha16` twin (ONE knob: rank). Result -- **r4 == r8 within noise on
+every axis at every step**, both flat to 2000:
+
+| step 2000, reserved sources, ASI plan | r8 | r4 |
+|---|---|---|
+| MOS | 3.169 | 3.139 |
+| sim | 0.759 | 0.757 (both project records) |
+| shifted labels | 16/20 | 16/20 |
+| indian | clb_b0006 @ 3.47 | clb_b0006 @ 3.35 |
+
+First indian labels ever above 3.3 MOS, on the SAME clip in both runs.
+vs the v1 student: -0.26 MOS traded for ~2x the accent shift -- the
+deliberate depth-for-quality trade, ratified by ear at the teacher stage.
+Rank story for the writeup: the accent DIRECTION is rank-1-expressible; the
+accent+repair RENDERING compresses to r4 with zero loss (r8 twin identical);
+**the persona ships as r4 @ step 2000** (LoRA merges at serving either way).
+
+### Recipe for the next persona (TNI) and open items
+
+Pipeline per persona: (1) latent LoRA arm on the persona crosspairs, lr 5e-5,
+early checkpoints -- take step ~100; (2) probe teachers with
+`gate_teacher_renders.py` (stack bridge x1.0 through the LoRA ckpt first --
+it won for ASI); (3) EARS gate; (4) full render + r4 distill student, 2000
+steps; (5) eval + ears at step 2000. For TNI specifically: build a clean
+reference FIRST (`scripts/make_clean_reference.py` -- the TNI recordings are
+noisy and X-VC conditions on the first 3 s of the reference; serving
+loudnorm amplifies any hiss into static).
+
+Open: PersonaPlex live-path ear check of the v2 r4 checkpoint (offline eval
+does not cover the 16k->24k + loudnorm serving path); publish via
+`scripts/publish_checkpoint.py`; the student-scale ratchet (amplify the
+student's own delta -> re-distill) if more depth is wanted; and the
+direct-route open question -- recon_ratio > 0.2, 5x data (L2-ARCTIC has
+~1100 utts/speaker vs the ~200 pairs used), and DTW-alignment auditing were
+never varied, and any of them could make the latent objective stable enough
+to obsolete the distill stage entirely.
+
 ## Eval contamination (found 2026-07-09)
 
 The evals collected so far did NOT use the designed held-out sources. The
