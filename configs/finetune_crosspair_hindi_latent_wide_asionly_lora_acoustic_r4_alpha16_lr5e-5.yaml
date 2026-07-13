@@ -1,0 +1,54 @@
+# DIRECT-ROUTE stabilization arm 4 (single-voice) -- PERSONA MODE ASI.
+# The persona is ASI THE INDIVIDUAL -- his voice and his particular accent
+# realization -- so training targets are ASI only (the RRBI-widened variant
+# exists as _wide_hindim for comparison, but generic Hindi-male data would
+# generalize away exactly the ASI-specific realization the persona needs).
+# Data: the 2.0 s-floor rebuild (references held >= 3.0 s), audit-filtered,
+# ASI targets only: 349 clean train pairs / 17 val = 19.2 min ASI audio
+# (vs ~11 min in every prior latent arm). Combined data-side arm: more pairs
+# + cleaner alignments + lower floor. Guarded run needs
+# --validate_min_duration 2.0. Dataset ships in crosspair_hindi_latent_wide.tgz
+# (slice: grep '\"ASI__' on the _wide_hindim manifests + cp align_meta.json).
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_wide_asionly/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_wide_asionly/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.2     # 80% native->ASI accent pressure, 20% clean anchor
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 4
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 50
+save_interval: 50               # dense checkpoints across the acquisition window
+keep_interval: 50
+total_step: 600
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
+    lora:
+      enabled: true
+      r: 4
+      alpha: 16                 # scaling = alpha/r = 4
+      dropout: 0.0
+      target_modules: [acoustic_converter]
+      include: ["attn.", "ff_x.ff", "ff_c.ff"]
+    optim_conf:
+      lr: 0.00005
