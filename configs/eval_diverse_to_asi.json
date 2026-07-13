@@ -1,4 +1,8 @@
 {
+  "purpose": "ASI persona diverse-input eval: native seen-speakers (bdl/slt) plus UNSEEN accented sources (Arabic ABA, Spanish MBMPS, Hindi SVBI) all convert to ASI -- unseen-speaker generalization and accented-input robustness on the reserved prompts",
+  "source_group": "diverse_unseen",
+  "allowed_source_speakers": ["bdl", "slt", "ABA", "MBMPS", "SVBI"],
+  "target_group": "hindi",
   "assignments": {
     "bdl": "ASI",
     "slt": "ASI",

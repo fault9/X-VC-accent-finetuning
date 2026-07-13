@@ -348,9 +348,14 @@ def build_evaluation_pairs(sources, targets, plan_path: Optional[str], targets_d
 
     plan_file = Path(plan_path)
     plan = json.loads(plan_file.read_text(encoding="utf-8"))
-    if plan.get("source_group") != "native_english":
+    if not plan.get("source_group"):
+        # Historical guard: plans originally had to assert the native-carrier
+        # stimulus ('native_english'). Diverse/unseen-speaker sets are now
+        # legitimate stimuli, so any non-empty class label is accepted -- it
+        # documents what the rows mean and keeps unlabeled plans from running.
         raise SystemExit(
-            "[error] evaluation plan must declare source_group='native_english'"
+            "[error] evaluation plan must declare a source_group label "
+            "(e.g. 'native_english', 'diverse_unseen')"
         )
 
     allowed = set(plan.get("allowed_source_speakers") or [])
