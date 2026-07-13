@@ -1,0 +1,61 @@
+# DIRECT-ROUTE stabilization arm 1 -- PERSONA MODE ASI (Hindi M). Tests
+# whether the latent objective's naturalness collapse is PREVENTABLE IN PLACE
+# by doubling the clean identity anchor, on the current winning recipe. If the
+# MOS curve flattens while the accent shift holds, direct fine-tuning on real
+# ASI pairs suffices and the distill stage becomes optional -- the open
+# question in CHANGES.md "Recipe for the next persona". If it merely slows the
+# same slide (like halving lr did), the collapse is intrinsic to the warped
+# supervision and the remaining data-side levers are more pairs + the
+# audit_alignment_qc.py filter.
+#
+# ONE knob vs finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_
+# alpha16_lr5e-5.yaml: reconstruction_ratio 0.2 -> 0.4 (accent pressure per
+# step drops 80% -> 60%, so expect slower acquisition; the window may sit at
+# 150-300 instead of 100). Dense saves (50) and total_step 600 change only
+# observation cadence, matching the prenet arm. NOTE an earlier "gentle arm"
+# config exists (prenet_r8_lr5e-5_recon30, shared two-persona set, pre-sweep
+# era) with no recorded result -- this arm supersedes it on the persona
+# recipe.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/crosspair_hindi_latent_400_asi/manifests/train.jsonl
+  val:
+    - data/crosspair_hindi_latent_400_asi/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.4     # doubled clean anchor -- THE knob under test
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: true        # training-only DTW map; waveforms stay pristine
+  static:
+    batch_size: 4
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 50
+save_interval: 50               # dense checkpoints across the acquisition window
+keep_interval: 50
+total_step: 600
+
+generator_warmup_steps: 100000  # adversarial path effectively off for this short run
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
+    lora:
+      enabled: true
+      r: 4
+      alpha: 16                 # scaling = alpha/r = 4
+      dropout: 0.0
+      target_modules: [acoustic_converter]
+      include: ["attn.", "ff_x.ff", "ff_c.ff"]
+    optim_conf:
+      lr: 0.00005
