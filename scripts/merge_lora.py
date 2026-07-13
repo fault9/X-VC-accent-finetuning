@@ -42,12 +42,23 @@ def main():
     ap.add_argument("--config", required=True, help="training config.yaml (has the lora block)")
     ap.add_argument("--ckpt", required=True, help="LoRA checkpoint (base + lora_A/lora_B)")
     ap.add_argument("--out", required=True, help="output merged checkpoint path")
+    ap.add_argument("--lora-scale", type=float, default=1.0,
+                    help="multiply the adapter delta before folding it in "
+                         "(>1 deepens the learned accent shift at some texture "
+                         "cost -- gate scaled variants by ear before serving)")
     args = ap.parse_args()
 
     device = torch.device("cpu")
     # load_from_checkpoint injects the adapter topology from the config, then loads
     # base + lora_A/lora_B by exact key match.
     model = XVC.load_from_checkpoint(Path(args.config), Path(args.ckpt), device)
+    if args.lora_scale != 1.0:
+        n_scaled = 0
+        for m in model.modules():
+            if isinstance(m, LoRALinear):
+                m.scaling *= args.lora_scale
+                n_scaled += 1
+        print(f"[merge_lora] adapter delta scaled x{args.lora_scale:g} on {n_scaled} layers")
 
     n_adapters = sum(1 for m in model.modules() if isinstance(m, LoRALinear))
     if n_adapters == 0:
