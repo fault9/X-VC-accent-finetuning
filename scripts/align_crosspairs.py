@@ -908,7 +908,10 @@ def main() -> int:
             rr["raw_target_wav_path"] = str(raw_tgt_out).replace("\\", "/")
             rr["target_reference_wav_path"] = str(ref_out).replace("\\", "/")
             if alignment_positions is not None:
-                alignment_out = out / "alignment" / f"{r['source_utt']}.npy"
+                # source_utt alone is NOT unique once a source pairs with more
+                # than one target speaker (e.g. ASI and RRBI) -- key per pair.
+                alignment_out = (out / "alignment"
+                                 / f"{r['source_utt']}__{target_speaker(r)}.npy")
                 alignment_out.parent.mkdir(parents=True, exist_ok=True)
                 np.save(alignment_out, alignment_positions, allow_pickle=False)
                 rr["latent_alignment_path"] = str(alignment_out).replace("\\", "/")

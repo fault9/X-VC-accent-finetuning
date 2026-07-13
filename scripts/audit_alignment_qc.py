@@ -34,6 +34,19 @@ def load_jsonl(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def manifest_target_key(row: dict) -> str:
+    """Derive the QC rows' 'SPEAKER:arctic_prompt' key from a manifest row."""
+    utt = row["target_utt"][:-3] if row["target_utt"].endswith("_ft") else row["target_utt"]
+    speaker, rest = utt.split("__", 1)
+    return f"{speaker}:arctic_{rest.split('_arctic_', 1)[1]}"
+
+
+def pair_key(source_utt: str, target_key: str) -> str:
+    """source_utt alone is ambiguous once one source pairs with several target
+    speakers (ASI + RRBI) -- exclusions are keyed per (source, target) pair."""
+    return f"{source_utt} {target_key}"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -57,9 +70,10 @@ def main(argv=None) -> int:
     if args.manifest:
         keep = set()
         for m in args.manifest.split(","):
-            keep |= {r["source_utt"] for r in load_jsonl(m.strip())}
-        rows = [r for r in rows if r["source_utt"] in keep]
-        missing = keep - {r["source_utt"] for r in rows}
+            keep |= {pair_key(r["source_utt"], manifest_target_key(r))
+                     for r in load_jsonl(m.strip())}
+        rows = [r for r in rows if pair_key(r["source_utt"], r["target_key"]) in keep]
+        missing = keep - {pair_key(r["source_utt"], r["target_key"]) for r in rows}
         if missing:
             print(f"[warn] {len(missing)} manifest pairs have no QC row "
                   f"(older build?): e.g. {sorted(missing)[:3]}")
@@ -70,7 +84,7 @@ def main(argv=None) -> int:
     flagged: dict[str, list[str]] = {}
 
     def flag(r, reason):
-        flagged.setdefault(r["source_utt"], []).append(reason)
+        flagged.setdefault(pair_key(r["source_utt"], r["target_key"]), []).append(reason)
 
     for r in rows:
         if r.get("diagnostic_mel_improvement") is not None \
@@ -108,10 +122,12 @@ def main(argv=None) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(f"# audit_alignment_qc.py over {args.qc}\n")
-            for utt in sorted(flagged):
-                f.write(f"{utt}  # {'; '.join(flagged[utt])}\n")
-        print(f"[out] {args.out} ({len(flagged)} exclusions) -- pass to "
-              f"align_crosspairs.py --exclude-file")
+            f.write("# columns: source_utt target_key (pair-unique; source_utt "
+                    "alone is ambiguous when a source pairs with several "
+                    "target speakers)\n")
+            for key in sorted(flagged):
+                f.write(f"{key}  # {'; '.join(flagged[key])}\n")
+        print(f"[out] {args.out} ({len(flagged)} pair exclusions)")
     return 0
 
 
