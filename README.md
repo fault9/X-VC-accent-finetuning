@@ -167,6 +167,8 @@ the released X-VC checkpoint.
   [`docs/phoneaware_accentbridge.md`](docs/phoneaware_accentbridge.md)
 - **Hindi/ASI semantic-vs-acoustic stream audit:**
   [`docs/xvc_accent_stream_audit.md`](docs/xvc_accent_stream_audit.md)
+- **Source-agnostic joint target-persona mapper:**
+  [`docs/joint_persona_mapper.md`](docs/joint_persona_mapper.md)
 - **Code architecture / refactor map:** [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md),
   [`docs/architecture.md`](docs/architecture.md)
 

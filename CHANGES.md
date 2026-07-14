@@ -1799,3 +1799,22 @@ The shared validator now honors that explicit declaration by checking source
 and target durations independently instead of demanding equal sample counts;
 all remaining audio/split/path checks stay active, and canonical SHA-256
 manifests are verified in full.
+
+## Joint target-persona mapper after the causal stream audit (2026-07-15)
+
+The ASI stream-swap audit found that neither ASI semantic features alone
+(1/18 Indian) nor ASI acoustic codes alone (0/18) were sufficient, while the
+matched pair was materially stronger (6/18 mapped; 9/18 on the original ASI
+timeline). This closes the single-stream AccentBridge path.
+
+The new joint mapper edits both source-side streams through one causal trunk,
+then returns acoustic predictions to X-VC's frozen codebook. It is explicitly a
+target-persona adapter: no source-speaker id enters the model, while the normal
+frozen X-VC ASI reference path continues to provide target voice. Pristine
+native/ASI sequences remain unwarped; MFA phones bound a differentiable
+monotonic training loss. The controlled runner balances source speakers and
+requires prompt-disjoint evaluation on at least two unseen source speakers,
+with automatic MOS, WER, target-speaker-similarity, and Indian-accent gates.
+
+See `docs/joint_persona_mapper.md` and
+`scripts/run_joint_persona_mapper_sweep.sh`.

@@ -50,7 +50,12 @@ def main(argv=None) -> int:
         raise SystemExit(f"[error] missing audit metadata: {meta_path}")
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     conditions = list(meta["conditions"])
-    manifest_root = audit_root / "asi_sem__asi_zq_original"
+    manifest_condition = meta.get("manifest_condition", conditions[0])
+    if manifest_condition not in conditions:
+        raise SystemExit(
+            f"[error] manifest_condition {manifest_condition!r} is not in conditions"
+        )
+    manifest_root = audit_root / manifest_condition
     _, by_target = _read_manifests(manifest_root)
 
     # Match the established evaluator's memory-safe model load order.
