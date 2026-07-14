@@ -1385,6 +1385,39 @@ reasons the direct route also UNDER-DELIVERS accent depth, and two more
 points for the distill stage, which needs no correspondence and inherits
 whatever the teacher renders.
 
+## L15 rebuild safety correction (2026-07-14)
+
+The first L15 rebuild runner treated a 40-file, print-only MOS/accent report as
+a "gate" and then always continued to training.  It did not measure content
+agreement or speaker similarity, did not filter individual teacher errors, and
+described a student MOS near 3.0 plus improved WER as an expected outcome.
+That claim was stronger than the evidence: the merge-scale ladder already
+showed that the deeper x1.5 delta increases WER, and ordinary distillation can
+copy a teacher's recognition errors rather than repair them.
+
+`scripts/gate_teacher_renders.py` now has a backwards-compatible quick-probe
+mode and a production, fail-closed mode used by `run_l15_rebuild.sh`.  The
+production mode scores **all** L10/L15 renders on matched carriers with the
+same metric stack used elsewhere (UTMOS, CommonAccent, Whisper, ERes2Net).  WER
+uses a real sidecar transcript when available and otherwise ASR(source) as an
+explicitly labelled content-agreement proxy.  It writes per-clip/summary/
+rejection CSVs, a machine-readable gate report, and filtered train/val
+manifests.  Candidate renders are rejected below MOS 2.8, above utterance WER
+0.10, or below similarity 0.65.  Before any GPU training starts, the retained
+set must have at least 100 items / 50% of the render pool / 5 validation items,
+mean MOS >=2.8, mean WER <=0.06, mean similarity >=0.65, and a paired ordinal
+accent-depth gain >=0.05 over L10.  Failure exits non-zero and the rebuild
+stops before `run_guarded_train_eval.sh`.
+
+The ordinal accent gate records its assumption (`indian=2`, `england=1`, other
+=0) because CommonAccent is not ground truth.  Passing it permits the student
+experiment; it does not replace blinded listening.  The claimed 2.95--3.05
+student MOS is now documented as a **hypothesis**.  The L10 student recipe is
+otherwise held fixed so this remains a controlled deeper-teacher test.  Its
+0.1 reconstruction branch is accurately described as teacher-render
+reconstruction, not clean-human-audio anchoring; the previously tested real-ASI
+anchor did not move the L10 plateau and is not silently added as a second knob.
+
 ## Eval contamination (found 2026-07-09)
 
 The evals collected so far did NOT use the designed held-out sources. The
