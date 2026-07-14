@@ -503,9 +503,13 @@ def main(argv=None) -> int:
     if failures:
         for failure in failures:
             print(f"  FAIL: {failure}", file=sys.stderr)
-        raise SystemExit("[error] L15 teacher gate failed; refusing to train student")
+        candidate_name = Path(args.candidate_root).name
+        raise SystemExit(
+            f"[error] {candidate_name} teacher gate failed; refusing to train student"
+        )
 
-    print("  PASS: filtered L15 teacher set is eligible for student training")
+    candidate_name = Path(args.candidate_root).name
+    print(f"  PASS: filtered {candidate_name} teacher set is eligible for student training")
     return 0
 
 

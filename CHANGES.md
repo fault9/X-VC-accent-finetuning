@@ -1670,3 +1670,30 @@ freeze is verifiable, not assumed.
 
 Step-by-step commands, environment setup, and output locations are in
 `docs/finetuning.md`.
+
+## Intermediate teacher-depth bracket (2026-07-14)
+
+L10 remains the quality-preserving stack-distillation baseline, but informal
+listening found its Hindi accent too weak. L15 was not accepted as the remedy:
+although its all-render accent-depth proxy increased from 0.7647 to 0.8824,
+only 54/221 renders passed the fixed clip-quality filters, and the retained set
+did not increase the classifier's Indian fraction over its paired L10 clips.
+This suggests that simply amplifying the teacher can trade texture for a broad
+US-to-England shift rather than reliably strengthening Hindi pronunciation.
+
+`scripts/run_intermediate_teacher_sweep.sh` now brackets that transition at
+renderer LoRA scales 1.2 (L12) and 1.25 (L12.5). Each scale is rendered over
+the complete carrier set and passed through the same fail-closed MOS, WER,
+speaker-similarity, retained-count, retained-fraction, and validation-count
+floors used for L15. The paired ordinal accent-depth floor is pre-registered at
+0.02 rather than L15's 0.05 because these are deliberately smaller treatments;
+the CommonAccent labels remain a screening proxy and do not replace listening.
+No clip-quality threshold is relaxed.
+
+Only candidates that pass receive one controlled student run using r4,
+alpha=16, LR=1e-4, batch 8, acoustic-converter+prenet targets, and 2000 steps.
+The two new student configs differ from the established L10 r4 recipe only in
+their gate-filtered teacher dataset. This is a teacher-depth comparison, not a
+rank/LR sweep. A gate failure skips that student and continues to the other
+candidate. `TRAIN_PASSING=0` provides a render-and-gate-only mode, and
+`REUSE_INTERMEDIATE_RENDER=1` safely reuses complete render manifests.

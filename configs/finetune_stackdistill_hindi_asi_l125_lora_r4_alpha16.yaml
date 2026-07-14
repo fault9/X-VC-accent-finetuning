@@ -1,0 +1,47 @@
+# Controlled intermediate-depth student. The only treatment change relative to
+# the established L10 r4 student is the fail-closed, L12.5-filtered teacher data.
+# L12.5 brackets the region between the clean-but-weak L10 teacher and the
+# unstable L15 teacher without relaxing any quality/content/identity threshold.
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/stackdistill_hindi_asi_l125_filtered/manifests/train.jsonl
+  val:
+    - data/stackdistill_hindi_asi_l125_filtered/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 0.1
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: false
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 2000
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    lora:
+      enabled: true
+      r: 4
+      alpha: 16
+      dropout: 0.0
+      target_modules: [acoustic_converter, prenet]
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "attn_norm_x.", "norm_out.", "pwconv"]
+    optim_conf:
+      lr: 0.0001
