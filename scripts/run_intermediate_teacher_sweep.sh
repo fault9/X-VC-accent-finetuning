@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Bracket the L10 -> L15 teacher-depth trade-off at L12 and L12.5.
 #
-# Each candidate is rendered on all carriers, scored against the same L10
-# baseline, and filtered with the established quality/content/identity floors.
+# A fresh L10 baseline and both candidates are rendered from the same surviving
+# alignment-filtered step-100 checkpoint. Each candidate is scored against that
+# matched L10 and filtered with the established quality/content/identity floors.
 # A candidate that fails its gate is recorded and skipped. A passing candidate
 # gets exactly one controlled r4/alpha16 student run, so teacher depth remains
 # the only experimental treatment.
@@ -25,18 +26,20 @@ printf 'candidate\tscale\tgate\tstudent\n' > "$status_file"
 
 reuse_render="${REUSE_INTERMEDIATE_RENDER:-0}"
 train_passing="${TRAIN_PASSING:-1}"
+renderer_config="configs/finetune_crosspair_hindi_latent_400_asi_filtered_lora_acoustic_r4_alpha16_lr5e-5.yaml"
+renderer_ckpt="exp/finetune_crosspair_hindi_latent_400_asi_filtered_lora_acoustic_r4_alpha16_lr5e-5/ckpt/000100.pt"
+renderer_sha256="90b2f27ec6cb720e83ab576d38fb1f92d83b9319a55360f6826c809d66c7c781"
+baseline_root="data/stackdistill_hindi_asi_l10_matched"
 
 required_files=(
   ckpts/xvc.pt
   exp/accentbridge_asi_l0plus/bridge.pt
-  exp/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5/ckpt/000100.pt
-  configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5.yaml
+  "$renderer_ckpt"
+  "$renderer_config"
   configs/finetune_stackdistill_hindi_asi_l12_lora_r4_alpha16.yaml
   configs/finetune_stackdistill_hindi_asi_l125_lora_r4_alpha16.yaml
   configs/eval_hindi_native_to_asi.json
   data/eval_targets/ASI.wav
-  data/stackdistill_hindi_asi_l10/manifests/train.jsonl
-  data/stackdistill_hindi_asi_l10/manifests/val.jsonl
 )
 for path in "${required_files[@]}"; do
   [[ -f "$path" ]] || { echo "[error] missing required file: $path" >&2; exit 1; }
@@ -45,6 +48,14 @@ done
   echo "[error] missing data/eval_sources_reserved" >&2
   exit 1
 }
+
+actual_renderer_sha256="$(sha256sum "$renderer_ckpt" | awk '{print $1}')"
+if [[ "$actual_renderer_sha256" != "$renderer_sha256" ]]; then
+  echo "[error] renderer checkpoint SHA mismatch" >&2
+  echo "expected: $renderer_sha256" >&2
+  echo "actual:   $actual_renderer_sha256" >&2
+  exit 1
+fi
 
 if pgrep -af 'torchrun|deepspeed|bins.train|eval_checkpoints' >/dev/null; then
   echo "[error] another X-VC train/eval process is already visible" >&2
@@ -63,16 +74,10 @@ if (( gpu_used_mib > 1024 )); then
   exit 1
 fi
 
-render_and_gate() {
+render_dataset() {
   local label="$1"
   local scale="$2"
   local data_root="data/stackdistill_hindi_asi_${label}"
-  local filtered_root="${data_root}_filtered"
-  local gate_out="exp/teacher_gates/${label}_rebuild"
-
-  mkdir -p "$gate_out"
-  echo ""
-  echo "=== ${label^^} TEACHER RENDER + GATE START $(date) ==="
 
   local reuse_ok=0
   if [[ "$reuse_render" == "1" ]] && \
@@ -91,7 +96,7 @@ raise SystemExit(0 if math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9) 
 PY
     then
       reuse_ok=1
-      echo "=== reusing verified ${label^^} render dataset ==="
+      echo "=== reusing verified ${label^^} render dataset (scale $scale) ==="
     else
       echo "[warn] existing ${label^^} metadata does not match scale $scale; rerendering"
     fi
@@ -101,19 +106,33 @@ PY
     python scripts/make_distill_dataset.py \
       --source-glob 'data/distill_sources_asi/*.wav' \
       --bridge-ckpt exp/accentbridge_asi_l0plus/bridge.pt --delta-scale 1.0 \
-      --config configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5.yaml \
-      --ckpt exp/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5/ckpt/000100.pt \
+      --config "$renderer_config" \
+      --ckpt "$renderer_ckpt" \
       --lora-scale "$scale" \
       --reference data/eval_targets/ASI.wav \
       --out "$data_root" --device 0
   fi
+}
+
+render_and_gate() {
+  local label="$1"
+  local scale="$2"
+  local data_root="data/stackdistill_hindi_asi_${label}"
+  local filtered_root="${data_root}_filtered"
+  local gate_out="exp/teacher_gates/${label}_rebuild"
+
+  mkdir -p "$gate_out"
+  echo ""
+  echo "=== ${label^^} TEACHER RENDER + GATE START $(date) ==="
+
+  render_dataset "$label" "$scale"
 
   python scripts/gate_teacher_renders.py \
-    data/stackdistill_hindi_asi_l10/wavs \
+    "$baseline_root/wavs" \
     "$data_root/wavs" \
     --candidate-root "$data_root" \
     --filtered-root "$filtered_root" \
-    --baseline-dir data/stackdistill_hindi_asi_l10/wavs \
+    --baseline-dir "$baseline_root/wavs" \
     --candidate-dir "$data_root/wavs" \
     --reference data/eval_targets/ASI.wav \
     --config configs/xvc.yaml \
@@ -180,8 +199,14 @@ run_candidate() {
 }
 
 echo "=== INTERMEDIATE TEACHER SWEEP START $(date) ==="
+echo "renderer checkpoint: $renderer_ckpt"
+echo "renderer sha256:    $renderer_sha256"
 echo "quality thresholds match the L15 gate; paired depth-gain floor is 0.02"
 echo "status: $status_file"
+
+echo ""
+echo "=== MATCHED L10 BASELINE RENDER START $(date) ==="
+render_dataset l10_matched 1.0
 
 run_candidate l12 1.2
 run_candidate l125 1.25

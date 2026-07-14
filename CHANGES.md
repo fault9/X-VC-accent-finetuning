@@ -1681,7 +1681,17 @@ did not increase the classifier's Indian fraction over its paired L10 clips.
 This suggests that simply amplifying the teacher can trade texture for a broad
 US-to-England shift rather than reliably strengthening Hindi pronunciation.
 
-`scripts/run_intermediate_teacher_sweep.sh` now brackets that transition at
+The exact historical L10 renderer checkpoint (SHA256 `d053e9cd...`) was no
+longer present when this bracket was launched. It is not scientifically valid
+to relabel a similarly sized checkpoint as that teacher. The sweep therefore
+uses the surviving alignment-filtered step-100 renderer (SHA256
+`90b2f27e...`), whose recorded step-100 metrics matched the original teacher
+to three decimals, and renders a new scale-1.0 baseline from it before doing
+anything else. The checkpoint SHA is asserted at runtime. This makes the new
+L10/L12/L12.5 bracket internally controlled, while keeping the historical L10
+result separate.
+
+`scripts/run_intermediate_teacher_sweep.sh` brackets that matched baseline at
 renderer LoRA scales 1.2 (L12) and 1.25 (L12.5). Each scale is rendered over
 the complete carrier set and passed through the same fail-closed MOS, WER,
 speaker-similarity, retained-count, retained-fraction, and validation-count
