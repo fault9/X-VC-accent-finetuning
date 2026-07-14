@@ -15,14 +15,20 @@ mkdir -p exp/run_logs exp/teacher_gates/l15_rebuild
 echo "=== L15 REBUILD START $(date) ==="
 echo "The student MOS/WER outcome is a hypothesis; only the teacher gate is pre-registered."
 
-python scripts/make_distill_dataset.py \
-  --source-glob 'data/distill_sources_asi/*.wav' \
-  --bridge-ckpt exp/accentbridge_asi_l0plus/bridge.pt --delta-scale 1.0 \
-  --config configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5.yaml \
-  --ckpt exp/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5/ckpt/000100.pt \
-  --lora-scale 1.5 \
-  --reference data/eval_targets/ASI.wav \
-  --out data/stackdistill_hindi_asi_l15 --device 0
+if [[ "${REUSE_L15_RENDER:-0}" == "1" ]] && \
+   [[ -f data/stackdistill_hindi_asi_l15/manifests/train.jsonl ]] && \
+   [[ -f data/stackdistill_hindi_asi_l15/manifests/val.jsonl ]]; then
+  echo "=== reusing existing L15 render dataset ==="
+else
+  python scripts/make_distill_dataset.py \
+    --source-glob 'data/distill_sources_asi/*.wav' \
+    --bridge-ckpt exp/accentbridge_asi_l0plus/bridge.pt --delta-scale 1.0 \
+    --config configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5.yaml \
+    --ckpt exp/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5/ckpt/000100.pt \
+    --lora-scale 1.5 \
+    --reference data/eval_targets/ASI.wav \
+    --out data/stackdistill_hindi_asi_l15 --device 0
+fi
 
 python scripts/gate_teacher_renders.py \
   data/stackdistill_hindi_asi_l10/wavs \
@@ -46,6 +52,11 @@ python scripts/gate_teacher_renders.py \
   --min-retained-count 100 \
   --min-retained-fraction 0.50 \
   --min-retained-val 5
+
+if [[ "${PREPARE_ONLY:-0}" == "1" ]]; then
+  echo "=== L15 PREPARE-ONLY DONE $(date); teacher gate passed ==="
+  exit 0
+fi
 
 mkdir -p exp/finetune_stackdistill_hindi_asi_l15_lora_r4_alpha16 exp/run_logs
 

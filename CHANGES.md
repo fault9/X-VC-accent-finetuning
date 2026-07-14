@@ -1385,6 +1385,71 @@ reasons the direct route also UNDER-DELIVERS accent depth, and two more
 points for the distill stage, which needs no correspondence and inherits
 whatever the teacher renders.
 
+## Target-persona rank/LR/objective matrix (2026-07-14)
+
+Harsha's recommendation is now represented as a controlled, one-command
+matrix rather than a sequence of ad-hoc follow-ups.  One correction matters:
+the linked Thinking Machines Lab article ("LoRA Without Regret",
+https://thinkingmachines.ai/blog/lora/) does **not** establish that higher rank
+always overfits or that the lowest rank is always best.  It finds that low
+rank can become capacity-limited, that standard `alpha/r` parameterization
+makes the early optimal LR approximately rank-independent, that smaller
+batches can help, and that MLP coverage matters.  Its experiments are on LLMs,
+so these are hypotheses to test in X-VC, not speech-model laws.  Our converter
+target set already includes attention **and both MLPs**; it is not the
+attention-only setup the article warns about.
+
+The deployment objective is also separated cleanly:
+
+- **Target-only/no-pair control:** real ASI recordings as self-pairs
+  (`asi_selfpairs_wide`, ~19.2 min after QC), `acoustic_converter` only.  This
+  tests whether adapting solely on the destination persona is enough to make
+  arbitrary native inputs acquire that persona.  It is a valid control, but
+  it never observes native-content -> accented-content conversion, so success
+  is not assumed.
+- **Source-independent conversion treatment:** filtered L15 same-timeline
+  teacher renders.  The sources are generic content carriers, not identities
+  being learned; the target is always ASI.  Unlike raw cross-speaker DTW pairs,
+  these pseudo-pairs explicitly teach unknown-source content -> ASI-style
+  output without frame-correspondence artifacts.
+
+For each objective, the matrix runs ranks 1/2/4 at alpha 16 and batch 4,
+crossed with LRs 5e-5 and 1e-4.  Standard `alpha/r` makes early LR behavior
+approximately rank-independent, but the linked study still observed some
+longer-run rank dependence (especially at rank 1); the small 3x2 factorial
+therefore avoids confounding rank with LR.  In these new `acoustic` arms, LoRA covers every
+`nn.Linear` under `acoustic_converter`: attention, both MLPs, input/output
+projections, and speaker-conditioned AdaLN.  This is the literal
+converter-only test and follows the article's all-weight-matrices warning more
+closely than the older 69-layer core filter.  The L15 matrix also retains the
+known filtered converter+prenet r4 / batch-8 recipe as a historical control,
+so the supervisor's converter-only restriction is measured rather than
+assumed.  Target-only arms run 1000 steps; L15 students run 2000.  Every arm
+gets reserved-source eval and a final-checkpoint diverse/unseen-source eval.
+Because that second set is the actual test of the deployment claim, it is a
+fail-closed preflight requirement by default; `RUN_DIVERSE_EVAL=0` is the
+explicit opt-out.
+
+`scripts/run_persona_experiment_matrix.sh` prepares and gates L15, builds the
+real-ASI self-pair dataset if needed, generates explicit configs under
+`exp/persona_matrix/configs`, queues all arms **sequentially** on the single
+GPU, skips completed arms on restart, refuses to overwrite partial runs,
+records per-arm status, and prints a cross-run comparison.  A failed arm is
+recorded and later arms continue by default; an L15 teacher-gate failure skips
+all L15 students.  The master queue owns each long-running child process group;
+INT/TERM/exit cleans up the active render/train/eval instead of orphaning GPU
+work.  It deliberately does not invent a scalar winner from MOS,
+WER, similarity, and a noisy accent classifier--the Pareto candidates still
+require matched-clip listening.
+
+The wide-data result is not discarded but scoped correctly.  Increasing the
+direct ASI latent set to 349 clean pairs / ~19.2 min did not change its curve,
+so another wide-DTW arm is redundant.  Wider **carrier** coverage may still
+improve robustness to live, unseen inputs; it is assessed by the diverse eval
+and can be expanded later.  ASI and TNI are not combined merely to claim
+40 minutes: they are different target personas/voices and must remain separate
+if the goal is one adapter per accent x gender target.
+
 ## L15 rebuild safety correction (2026-07-14)
 
 The first L15 rebuild runner treated a 40-file, print-only MOS/accent report as

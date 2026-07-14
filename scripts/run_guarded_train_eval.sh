@@ -34,6 +34,7 @@ steps="100,200,300,400,600,800,1000"
 source_dir="data/eval_sources"
 targets_dir="data/eval_targets"
 evaluation_plan="configs/eval_hindi_native_to_accent.json"
+eval_out="eval_compare"
 validate_min_duration="3.0"
 num_workers=0
 gpus=1
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --source_dir)            source_dir="$2"; shift 2 ;;
     --targets_dir)           targets_dir="$2"; shift 2 ;;
     --evaluation_plan)       evaluation_plan="$2"; shift 2 ;;
+    --eval_out)              eval_out="$2"; shift 2 ;;
     --validate_min_duration) validate_min_duration="$2"; shift 2 ;;
     --num_workers)           num_workers="$2"; shift 2 ;;
     --gpus)                  gpus="$2"; shift 2 ;;
@@ -176,6 +178,7 @@ echo "steps                 : $steps"
 echo "validate_min_duration : $validate_min_duration"
 echo "run_train             : $run_train"
 echo "run_eval              : $run_eval"
+echo "eval_out              : $eval_out"
 echo "master_log            : $master_log"
 hostname
 pwd
@@ -274,7 +277,7 @@ if [[ "$run_eval" -eq 1 ]]; then
     --evaluation-plan "$evaluation_plan"
     --steps "$steps"
     --include-base "$checkpoint"
-    --out "$log_dir/eval_compare"
+    --out "$log_dir/$eval_out"
   )
   [[ "$mos" -eq 1 ]] && eval_cmd+=(--mos)
   [[ "$accent_clf" -eq 1 ]] && eval_cmd+=(--accent-clf)
