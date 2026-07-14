@@ -4,7 +4,39 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from xvc.data.stream_swap import build_phone_frame_map, resolve_audio_path
+from xvc.data.stream_swap import (
+    build_phone_frame_map,
+    phone_segments_from_textgrids,
+    resolve_audio_path,
+)
+
+
+TEXTGRID = '''File type = "ooTextFile"
+Object class = "TextGrid"
+xmin = 0
+xmax = 1
+tiers? <exists>
+size = 1
+item []:
+    item [1]:
+        class = "IntervalTier"
+        name = "phones"
+        xmin = 0
+        xmax = 1
+        intervals: size = 3
+        intervals [1]:
+            xmin = 0
+            xmax = 0.2
+            text = "sil"
+        intervals [2]:
+            xmin = 0.2
+            xmax = 0.6
+            text = "EH1"
+        intervals [3]:
+            xmin = 0.6
+            xmax = 1
+            text = "S"
+'''
 
 
 class PhoneFrameMapTest(unittest.TestCase):
@@ -73,6 +105,28 @@ class AudioPathResolutionTest(unittest.TestCase):
             second.write_bytes(b"second")
             with self.assertRaisesRegex(ValueError, "ambiguous"):
                 resolve_audio_path("deleted/clip.wav", [root])
+
+
+class TextGridPhoneSegmentTest(unittest.TestCase):
+    def test_derives_segments_without_warping(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.TextGrid"
+            target = root / "target.TextGrid"
+            source.write_text(TEXTGRID, encoding="utf-8")
+            target.write_text(TEXTGRID, encoding="utf-8")
+            segments, metadata = phone_segments_from_textgrids(
+                source,
+                target,
+                50,
+                60,
+                min_matched_phones=2,
+            )
+            self.assertEqual([segment["phone"] for segment in segments], ["eh", "s"])
+            self.assertEqual(metadata["label_match_rate"], 1.0)
+            self.assertFalse(metadata["source_was_warped"])
+            self.assertTrue(all(segment["src"][1] > segment["src"][0] for segment in segments))
+            self.assertTrue(all(segment["tgt"][1] > segment["tgt"][0] for segment in segments))
 
 
 if __name__ == "__main__":

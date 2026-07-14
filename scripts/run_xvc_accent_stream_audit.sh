@@ -5,7 +5,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PAIRS_ROOT="${PAIRS_ROOT:-data/accentbridge_pairs_phone_unwarped}"
+DATASET_ROOT="${DATASET_ROOT:-data/hindi_asi_pristine_parallel_221}"
+LEGACY_PAIRS_ROOT="${PAIRS_ROOT:-}"
 REFERENCE="${REFERENCE:-data/eval_targets/ASI.wav}"
 CONFIG="${CONFIG:-configs/xvc.yaml}"
 CHECKPOINT="${CHECKPOINT:-ckpts/xvc.pt}"
@@ -22,9 +23,20 @@ for required in "$REFERENCE" "$CONFIG" "$CHECKPOINT"; do
     exit 1
   fi
 done
-if [[ ! -d "$PAIRS_ROOT/val" ]]; then
-  echo "[error] missing phone-annotated validation pairs: $PAIRS_ROOT/val" >&2
-  exit 1
+if [[ -n "$LEGACY_PAIRS_ROOT" ]]; then
+  if [[ ! -d "$LEGACY_PAIRS_ROOT/val" ]]; then
+    echo "[error] missing legacy phone-pair shards: $LEGACY_PAIRS_ROOT/val" >&2
+    exit 1
+  fi
+  input_args=(--pairs-root "$LEGACY_PAIRS_ROOT")
+  input_label="legacy pairs root: $LEGACY_PAIRS_ROOT"
+else
+  if [[ ! -f "$DATASET_ROOT/manifests/val.jsonl" ]]; then
+    echo "[error] missing pristine validation manifest: $DATASET_ROOT/manifests/val.jsonl" >&2
+    exit 1
+  fi
+  input_args=(--dataset-root "$DATASET_ROOT")
+  input_label="dataset root: $DATASET_ROOT"
 fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -39,7 +51,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 echo "=== X-VC ACCENT STREAM AUDIT ==="
-echo "pairs root : $PAIRS_ROOT"
+echo "$input_label"
 echo "reference  : $REFERENCE"
 echo "checkpoint : $CHECKPOINT"
 echo "output     : $OUT"
@@ -47,7 +59,7 @@ echo "max pairs  : $MAX_PAIRS"
 echo "min GPU MiB: $MIN_FREE_GPU_MIB"
 
 python scripts/audit_xvc_accent_streams.py \
-  --pairs-root "$PAIRS_ROOT" \
+  "${input_args[@]}" \
   --split val \
   --target-speaker ASI \
   --reference "$REFERENCE" \

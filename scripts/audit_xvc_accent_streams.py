@@ -48,7 +48,7 @@ def _target_matches(item: dict[str, Any], speaker: str) -> bool:
     return any(wanted in str(value).casefold() for value in fields if value)
 
 
-def _load_items(root: Path, split: str, speaker: str, limit: int | None):
+def _load_shard_items(root: Path, split: str, speaker: str, limit: int | None):
     import torch
 
     split_dir = root / split
@@ -68,6 +68,27 @@ def _load_items(root: Path, split: str, speaker: str, limit: int | None):
             items.append(item)
             if limit and len(items) >= limit:
                 return items
+    return items
+
+
+def _load_dataset_items(root: Path, split: str, speaker: str, limit: int | None):
+    manifest = root / "manifests" / f"{split}.jsonl"
+    if not manifest.is_file():
+        raise FileNotFoundError(f"missing canonical dataset manifest: {manifest}")
+    items: list[dict[str, Any]] = []
+    with manifest.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON at {manifest}:{line_number}") from exc
+            if not _target_matches(item, speaker):
+                continue
+            items.append(item)
+            if limit and len(items) >= limit:
+                break
     return items
 
 
@@ -93,8 +114,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--pairs-root", required=True,
-                        help="phone-annotated AccentBridge pair root")
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument(
+        "--dataset-root",
+        help="canonical pristine dataset with manifests and phone TextGrids",
+    )
+    inputs.add_argument(
+        "--pairs-root",
+        help="legacy phone-annotated AccentBridge pair-shard root",
+    )
     parser.add_argument("--split", choices=("train", "val"), default="val")
     parser.add_argument("--target-speaker", default="ASI")
     parser.add_argument("--reference", required=True,
@@ -125,7 +153,11 @@ def main(argv=None) -> int:
         to_numpy_audio,
     )
     from models.codec.sac.utils import process_audio
-    from xvc.data.stream_swap import build_phone_frame_map, resolve_audio_path
+    from xvc.data.stream_swap import (
+        build_phone_frame_map,
+        phone_segments_from_textgrids,
+        resolve_audio_path,
+    )
 
     out = Path(args.out)
     if out.exists() and any(out.rglob("*.wav")) and not args.overwrite:
@@ -135,14 +167,29 @@ def main(argv=None) -> int:
         (out / condition / "manifests").mkdir(parents=True, exist_ok=True)
     (out / "maps").mkdir(parents=True, exist_ok=True)
 
-    items = _load_items(
-        Path(args.pairs_root), args.split, args.target_speaker, args.max_pairs
-    )
-    items = [item for item in items
-             if len(item.get("phone_segments", [])) >= args.min_phone_segments]
+    if args.dataset_root:
+        items = _load_dataset_items(
+            Path(args.dataset_root), args.split, args.target_speaker, args.max_pairs
+        )
+        input_mode = "canonical_pristine_dataset"
+        input_root = args.dataset_root
+    else:
+        items = _load_shard_items(
+            Path(args.pairs_root), args.split, args.target_speaker, args.max_pairs
+        )
+        items = [
+            item
+            for item in items
+            if len(item.get("phone_segments", [])) >= args.min_phone_segments
+        ]
+        input_mode = "legacy_phone_shards"
+        input_root = args.pairs_root
     if not items:
-        raise SystemExit("[error] no qualifying phone-annotated target-speaker pairs")
-    print(f"[audit] selected {len(items)} {args.target_speaker} pair(s) from {args.split}")
+        raise SystemExit("[error] no qualifying target-speaker pairs")
+    print(
+        f"[audit] selected {len(items)} candidate {args.target_speaker} "
+        f"pair(s) from {args.split} ({input_mode})"
+    )
     audio_search_roots = args.audio_search_root or ["data"]
 
     cfg, model, device = load_xvc(args.config, args.ckpt, args.device, False)
@@ -193,6 +240,7 @@ def main(argv=None) -> int:
 
     manifests: dict[str, list[dict[str, Any]]] = {name: [] for name in CONDITIONS}
     pair_metadata: list[dict[str, Any]] = []
+    pair_failures: list[dict[str, Any]] = []
 
     for index, item in enumerate(items, start=1):
         recorded_source_path = _path(item, "source_wav_path")
@@ -225,12 +273,39 @@ def main(argv=None) -> int:
         native_frames = int(native_sem.shape[-1])
         target_frames = int(target_sem.shape[-1])
 
-        stored_source_frames = int(item.get("sem_adapted_src", native_sem).shape[-1])
-        stored_target_frames = int(item.get("sem_adapted_tgt", target_sem).shape[-1])
+        if item.get("phone_segments"):
+            phone_segments = item["phone_segments"]
+            phone_meta = item.get("phone_meta", {})
+            stored_source_frames = int(
+                item.get("sem_adapted_src", native_sem).shape[-1]
+            )
+            stored_target_frames = int(
+                item.get("sem_adapted_tgt", target_sem).shape[-1]
+            )
+        else:
+            try:
+                phone_segments, phone_meta = phone_segments_from_textgrids(
+                    _path(item, "source_textgrid_path"),
+                    _path(item, "target_textgrid_path"),
+                    native_frames,
+                    target_frames,
+                    min_matched_phones=args.min_phone_segments,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                failure = {
+                    "source_utt": name,
+                    "target_utt": item.get("target_utt"),
+                    "error": str(exc),
+                }
+                pair_failures.append(failure)
+                print(f"  [skip] {name}: {exc}")
+                continue
+            stored_source_frames = native_frames
+            stored_target_frames = target_frames
         positions, map_info = build_phone_frame_map(
             native_frames,
             target_frames,
-            item["phone_segments"],
+            phone_segments,
             source_annotation_frames=stored_source_frames,
             target_annotation_frames=stored_target_frames,
         )
@@ -271,11 +346,16 @@ def main(argv=None) -> int:
                 "audio_path_remapped": bool(source_remapped or target_remapped),
                 "native_frames": native_frames,
                 "target_frames": target_frames,
-                "phone_segments": len(item["phone_segments"]),
+                "phone_segments": len(phone_segments),
+                "phone_meta": phone_meta,
                 "map": map_info,
             }
         )
         print(f"  {index}/{len(items)} {name}: native={native_frames} target={target_frames} frames")
+
+    rendered_count = len(pair_metadata)
+    if rendered_count == 0:
+        raise SystemExit("[error] no pairs passed runtime phone matching")
 
     for condition, rows in manifests.items():
         manifest_dir = out / condition / "manifests"
@@ -289,13 +369,18 @@ def main(argv=None) -> int:
     meta = {
         "schema_version": 1,
         "purpose": "causal source-stream localization; never training data",
+        "input_mode": input_mode,
+        "input_root": input_root,
+        "dataset_root": args.dataset_root,
         "pairs_root": args.pairs_root,
         "split": args.split,
         "target_speaker": args.target_speaker,
         "reference": args.reference,
         "config": args.config,
         "checkpoint": args.ckpt,
-        "n": len(items),
+        "candidates": len(items),
+        "n": rendered_count,
+        "failures": pair_failures,
         "mapping": {
             "semantic": "linear sampling of target stream at MFA-phone-derived positions",
             "acoustic_codes": "nearest-frame sampling at the same positions",
@@ -308,7 +393,10 @@ def main(argv=None) -> int:
     with (out / "audit_meta.json").open("w", encoding="utf-8") as handle:
         json.dump(meta, handle, indent=2)
 
-    print(f"[audit] rendered {len(items)} pair(s) x {len(CONDITIONS)} conditions -> {out}")
+    print(
+        f"[audit] rendered {rendered_count}/{len(items)} pair(s) x "
+        f"{len(CONDITIONS)} conditions -> {out}"
+    )
     print("[audit] compare asi_sem__asi_zq_mapped with asi_sem__asi_zq_original to measure mapping cost")
     return 0
 

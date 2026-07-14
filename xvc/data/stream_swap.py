@@ -12,6 +12,106 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from xvc.data.phone_supervision import align_phone_sequences, phone_tier
+
+
+def phone_segments_from_textgrids(
+    source_textgrid: str | Path,
+    target_textgrid: str | Path,
+    source_frames: int,
+    target_frames: int,
+    *,
+    min_label_match: float = 0.90,
+    boundary_trim_fraction: float = 0.15,
+    max_boundary_trim_frames: int = 1,
+    min_phone_frames: int = 2,
+    min_matched_phones: int = 5,
+    min_duration_ratio: float = 0.5,
+    max_duration_ratio: float = 2.0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Derive matched phone spans directly from pristine MFA TextGrids.
+
+    This is a diagnostic annotation operation only: it never resamples audio
+    or features.  Word-tier fallback is intentionally prohibited by
+    :func:`phone_tier`.
+    """
+
+    if source_frames < 2 or target_frames < 2:
+        raise ValueError("source_frames and target_frames must both be >= 2")
+    source_path = Path(source_textgrid)
+    target_path = Path(target_textgrid)
+    source_tier, source_phones, source_duration = phone_tier(source_path)
+    target_tier, target_phones, target_duration = phone_tier(target_path)
+    pairs, match_rate = align_phone_sequences(source_phones, target_phones)
+    if match_rate < min_label_match:
+        raise ValueError(
+            f"phone label match {match_rate:.1%} < {min_label_match:.1%}"
+        )
+
+    def frame_range(interval, duration: float, frames: int) -> tuple[int, int]:
+        lo = max(0, min(frames, int(round(interval.start / duration * frames))))
+        hi = max(lo + 1, min(frames, int(round(interval.end / duration * frames))))
+        return lo, hi
+
+    def trim_range(lo: int, hi: int) -> tuple[int, int] | None:
+        length = hi - lo
+        if length < min_phone_frames:
+            return None
+        margin = min(
+            max_boundary_trim_frames,
+            int(round(length * boundary_trim_fraction)),
+        )
+        if length - 2 * margin < min_phone_frames:
+            margin = 0
+        return lo + margin, hi - margin
+
+    segments: list[dict[str, Any]] = []
+    rejected_duration = 0
+    rejected_short = 0
+    for source_phone, target_phone, label in pairs:
+        duration_ratio = (source_phone.end - source_phone.start) / max(
+            target_phone.end - target_phone.start, 1e-8
+        )
+        if not min_duration_ratio <= duration_ratio <= max_duration_ratio:
+            rejected_duration += 1
+            continue
+        source_range = trim_range(
+            *frame_range(source_phone, source_duration, source_frames)
+        )
+        target_range = trim_range(
+            *frame_range(target_phone, target_duration, target_frames)
+        )
+        if source_range is None or target_range is None:
+            rejected_short += 1
+            continue
+        confidence = min(duration_ratio, 1.0 / duration_ratio)
+        segments.append(
+            {
+                "phone": label,
+                "src": list(source_range),
+                "tgt": list(target_range),
+                "duration_ratio": round(duration_ratio, 6),
+                "confidence": round(confidence, 6),
+            }
+        )
+    if len(segments) < min_matched_phones:
+        raise ValueError(
+            f"only {len(segments)} usable matched phones < {min_matched_phones}"
+        )
+
+    metadata = {
+        "source_textgrid": str(source_path),
+        "target_textgrid": str(target_path),
+        "source_tier": source_tier,
+        "target_tier": target_tier,
+        "label_match_rate": round(match_rate, 6),
+        "matched_phones": len(segments),
+        "rejected_duration": rejected_duration,
+        "rejected_short": rejected_short,
+        "source_was_warped": False,
+    }
+    return segments, metadata
+
 
 def resolve_audio_path(
     recorded_path: str | Path, search_roots: Sequence[str | Path]
