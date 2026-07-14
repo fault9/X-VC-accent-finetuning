@@ -4,6 +4,15 @@ Audit date: 2026-07-14, branch `target-conditioned-lowrank-lora`.
 This document maps the repository **before** refactoring. Nothing in it changes
 behavior; it is the safety baseline required before any code moves.
 
+> **Status (2026-07-14):** Phases 1–5 are implemented on this branch —
+> characterization tests, `xvc/` package (adapters/data/config/checkpointing),
+> consolidated entry points, compositional configs with verified legacy
+> equivalence, packaging, docs, and `MIGRATION.md`. Phase 6 (dead-code
+> removal, §18) is deliberately deferred pending another reference check.
+> The two behavioral changes shipped are listed exhaustively in
+> `MIGRATION.md`. 132 CPU tests pass; sections below describe the repository
+> as audited, and remain the map of the legacy layers that are still in place.
+
 Scope guardrails for the whole refactor (from the project brief):
 
 * no change to the mathematical behavior of X-VC (forward path, losses,
