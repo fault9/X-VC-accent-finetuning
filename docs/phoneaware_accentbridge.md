@@ -46,16 +46,38 @@ grep -n 'name = "phones"' path/to/example.TextGrid
 
 ## Queue validation and both MFA alignments
 
+First prepare the exact target-speaker subset from the pristine paths retained
+in the latent-crosspair manifests. This copies audio and writes transcripts;
+it does not warp or resample anything:
+
+```bash
+python scripts/prepare_phoneaware_mfa_corpus.py \
+  --train-manifest data/crosspair_hindi_latent_400/manifests/train.jsonl \
+  --val-manifest data/crosspair_hindi_latent_400/manifests/val.jsonl \
+  --prompts-file /mnt/d/l2arctic_release_v5.0/PROMPTS \
+  --target-speaker ASI \
+  --expected-train 200 \
+  --expected-val 21 \
+  --out data/mfa_hindi_phoneaware_asi
+```
+
 Once `mfa_corpus/source` and `mfa_corpus/target` contain matching WAV and LAB
 files, activate the environment where `mfa` is installed and run:
 
 ```bash
 MFA_ROOT=data/mfa_hindi_phoneaware_asi \
-MFA_DICTIONARY=english_us_arpa \
-MFA_ACOUSTIC_MODEL=english_us_arpa \
+MFA_DICTIONARY=english_us_mfa \
+MFA_ACOUSTIC_MODEL=english_mfa \
+MFA_NUM_JOBS=4 \
 nohup bash scripts/run_phoneaware_mfa_queue.sh \
   > mfa_phoneaware_queue.out 2>&1 &
 ```
+
+The standard validator checks corpus structure, OOVs, audio readability,
+feature generation, and trial alignment. The much slower per-speaker language
+model/lattice diagnostic is optional because these transcripts are copied
+directly from the pinned ARCTIC `PROMPTS`; enable it only with
+`MFA_TEST_TRANSCRIPTIONS=1` when specifically auditing transcript accuracy.
 
 The queue validates and aligns source and target independently, audits every
 output TextGrid for a genuine phone tier, then creates a small TextGrid archive
@@ -75,7 +97,8 @@ bash scripts/run_phoneaware_accentbridge_sweep.sh
 ```
 
 The preparation gate requires at least 90% phone-label agreement per retained
-pair and 80% dataset coverage. It reports missing TextGrids, missing phone
+pair and 80% coverage within the requested target speaker. Mixed ASI/TNI
+AccentBridge shards are filtered before coverage is calculated. It reports missing TextGrids, missing phone
 tiers, label mismatches, and supervised-frame counts in:
 
 - `data/accentbridge_pairs_phone_unwarped/phone_supervision_meta.json`

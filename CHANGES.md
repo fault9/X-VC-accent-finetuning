@@ -1748,3 +1748,17 @@ outputs needed on the training machine. The queue fails on missing corpora,
 WAV/transcript count mismatch, missing MFA executable, pre-existing ambiguous
 outputs, or any TextGrid without a genuine phone tier. It does not construct a
 time map and never launches training automatically from the MFA environment.
+
+`scripts/prepare_phoneaware_mfa_corpus.py` builds the exact target-speaker MFA
+corpus from pristine raw paths in the latent-crosspair manifests. It refuses
+to overwrite existing output and hard-checks the selected counts, prompt split,
+audio existence, mono channel layout, and 16 kHz sample rate before MFA runs.
+The MFA queue defaults to the MFA 3.x compatible `english_us_mfa` dictionary
+and `english_mfa` acoustic model rather than treating an ARPA dictionary name
+as an acoustic-model identifier.
+The expensive per-speaker lattice-based transcription test is now opt-in via
+`MFA_TEST_TRANSCRIPTIONS=1`; standard validation remains mandatory, and the
+queue exposes a conservative `MFA_NUM_JOBS` setting (default 4).
+Phone-supervision annotation now applies the requested target-speaker filter
+before computing coverage, so mixed ASI/TNI feature shards can be supervised
+against an intentionally ASI-only MFA corpus without counting TNI as missing.

@@ -7,7 +7,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from phone_supervision import align_phone_sequences, phone_tier, read_textgrid
-from annotate_accentbridge_phone_supervision import _resolve_textgrid, _trim_range
+from annotate_accentbridge_phone_supervision import (
+    _resolve_textgrid,
+    _target_speaker_matches,
+    _trim_range,
+)
 
 
 TEXTGRID = '''File type = "ooTextFile"
@@ -82,6 +86,10 @@ class PhoneSupervisionTest(unittest.TestCase):
                 "target_utt": "ASI__bdl_a0042", "target_speaker": "ASI",
                 "prompt": "a0042"}
         self.assertEqual(_resolve_textgrid(index, meta, "target"), expected)
+
+    def test_target_filter_accepts_composite_extractor_label(self):
+        self.assertTrue(_target_speaker_matches({"target_speaker": "ASI__bdl"}, "ASI"))
+        self.assertFalse(_target_speaker_matches({"target_speaker": "TNI__clb"}, "ASI"))
 
 
 if __name__ == "__main__":

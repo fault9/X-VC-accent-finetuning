@@ -10,11 +10,13 @@ TARGET_CORPUS="${TARGET_CORPUS:-$MFA_ROOT/mfa_corpus/target}"
 SOURCE_ALIGN_DIR="${SOURCE_ALIGN_DIR:-$MFA_ROOT/mfa_align/source}"
 TARGET_ALIGN_DIR="${TARGET_ALIGN_DIR:-$MFA_ROOT/mfa_align/target}"
 VALIDATION_ROOT="${VALIDATION_ROOT:-$MFA_ROOT/mfa_validation}"
-DICTIONARY="${MFA_DICTIONARY:-english_us_arpa}"
-ACOUSTIC_MODEL="${MFA_ACOUSTIC_MODEL:-english_us_arpa}"
+DICTIONARY="${MFA_DICTIONARY:-english_us_mfa}"
+ACOUSTIC_MODEL="${MFA_ACOUSTIC_MODEL:-english_mfa}"
 MFA_BIN="${MFA_BIN:-mfa}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 REUSE_MFA="${REUSE_MFA:-0}"
+MFA_NUM_JOBS="${MFA_NUM_JOBS:-4}"
+MFA_TEST_TRANSCRIPTIONS="${MFA_TEST_TRANSCRIPTIONS:-0}"
 
 for corpus in "$SOURCE_CORPUS" "$TARGET_CORPUS"; do
   [[ -d "$corpus" ]] || { echo "[error] missing MFA corpus: $corpus" >&2; exit 1; }
@@ -42,27 +44,34 @@ echo "=== PHONE-AWARE MFA QUEUE START $(date) ==="
 echo "MFA version: $($MFA_BIN version)"
 echo "dictionary: $DICTIONARY"
 echo "acoustic model: $ACOUSTIC_MODEL"
+echo "num jobs: $MFA_NUM_JOBS"
+echo "test transcriptions: $MFA_TEST_TRANSCRIPTIONS"
+
+validate_extra=(--clean --num_jobs "$MFA_NUM_JOBS")
+if [[ "$MFA_TEST_TRANSCRIPTIONS" == "1" ]]; then
+  validate_extra+=(--test_transcriptions)
+fi
 
 if [[ "$REUSE_MFA" != "1" ]]; then
   echo "=== VALIDATE SOURCE $(date) ==="
   "$MFA_BIN" validate "$SOURCE_CORPUS" "$DICTIONARY" \
     --acoustic_model_path "$ACOUSTIC_MODEL" \
-    --test_transcriptions \
+    "${validate_extra[@]}" \
     --output_directory "$VALIDATION_ROOT/source"
 
   echo "=== ALIGN SOURCE $(date) ==="
   "$MFA_BIN" align "$SOURCE_CORPUS" "$DICTIONARY" "$ACOUSTIC_MODEL" \
-    "$SOURCE_ALIGN_DIR"
+    "$SOURCE_ALIGN_DIR" --clean --num_jobs "$MFA_NUM_JOBS"
 
   echo "=== VALIDATE TARGET $(date) ==="
   "$MFA_BIN" validate "$TARGET_CORPUS" "$DICTIONARY" \
     --acoustic_model_path "$ACOUSTIC_MODEL" \
-    --test_transcriptions \
+    "${validate_extra[@]}" \
     --output_directory "$VALIDATION_ROOT/target"
 
   echo "=== ALIGN TARGET $(date) ==="
   "$MFA_BIN" align "$TARGET_CORPUS" "$DICTIONARY" "$ACOUSTIC_MODEL" \
-    "$TARGET_ALIGN_DIR"
+    "$TARGET_ALIGN_DIR" --clean --num_jobs "$MFA_NUM_JOBS"
 else
   echo "=== REUSING EXISTING MFA OUTPUTS ==="
 fi

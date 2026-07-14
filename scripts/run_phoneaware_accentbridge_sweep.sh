@@ -28,6 +28,7 @@ python scripts/annotate_accentbridge_phone_supervision.py \
   --source-align-dir "$SOURCE_ALIGN_DIR" \
   --target-align-dir "$TARGET_ALIGN_DIR" \
   --out "$PHONE_PAIRS_ROOT" \
+  --target-speaker "$TARGET_SPEAKER" \
   --tier phones \
   --min-label-match 0.90 \
   --min-pair-coverage 0.80 \

@@ -73,6 +73,11 @@ def _resolve_textgrid(index, meta, side):
     raise ValueError(f"missing {side} TextGrid; tried {candidates}")
 
 
+def _target_speaker_matches(meta, requested):
+    """Match the extractor's composite target labels (for example ASI__bdl)."""
+    return requested is None or requested in str(meta.get("target_speaker", ""))
+
+
 def annotate_item(item, src_grid: Path, tgt_grid: Path, args):
     import torch
 
@@ -153,6 +158,8 @@ def main(argv=None):
     ap.add_argument("--source-align-dir", required=True)
     ap.add_argument("--target-align-dir", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--target-speaker", default=None,
+                    help="annotate only this target persona (for example ASI)")
     ap.add_argument("--tier", choices=("phones", "phone"), default="phones")
     ap.add_argument("--min-label-match", type=float, default=0.90)
     ap.add_argument("--min-pair-coverage", type=float, default=0.80)
@@ -176,7 +183,7 @@ def main(argv=None):
     if out_root.exists() and any(out_root.rglob("shard_*.pt")):
         raise SystemExit(f"[error] {out_root} already contains output shards; "
                          "choose a new --out directory to avoid mixing runs")
-    qc_rows, failures, total, kept = [], [], 0, 0
+    qc_rows, failures, total, kept, ignored_other_target = [], [], 0, 0, 0
     split_counts = {}
     phone_gaps = defaultdict(list)
 
@@ -197,9 +204,12 @@ def main(argv=None):
         with (out_dir / "pairs_manifest.jsonl").open("w", encoding="utf-8") as manifest:
             for shard in sorted(in_dir.glob("shard_*.pt")):
                 for item in torch.load(shard, map_location="cpu"):
+                    meta = item["meta"]
+                    if not _target_speaker_matches(meta, args.target_speaker):
+                        ignored_other_target += 1
+                        continue
                     total += 1
                     split_total += 1
-                    meta = item["meta"]
                     try:
                         source_grid = _resolve_textgrid(source_grids, meta, "source")
                         target_grid = _resolve_textgrid(target_grids, meta, "target")
@@ -231,6 +241,8 @@ def main(argv=None):
     summary = {
         "status": "pass" if total and coverage >= args.min_pair_coverage and splits_pass else "fail",
         "pairs_seen": total, "pairs_kept": kept, "pairs_failed": len(failures),
+        "target_speaker_filter": args.target_speaker,
+        "pairs_ignored_other_target": ignored_other_target,
         "pair_coverage": round(coverage, 6),
         "minimum_pair_coverage": args.min_pair_coverage,
         "splits": split_counts,
