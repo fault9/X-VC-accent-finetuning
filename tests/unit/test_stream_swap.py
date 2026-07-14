@@ -1,8 +1,10 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from xvc.data.stream_swap import build_phone_frame_map
+from xvc.data.stream_swap import build_phone_frame_map, resolve_audio_path
 
 
 class PhoneFrameMapTest(unittest.TestCase):
@@ -47,6 +49,30 @@ class PhoneFrameMapTest(unittest.TestCase):
     def test_empty_segments_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "at least one"):
             build_phone_frame_map(10, 10, [])
+
+
+class AudioPathResolutionTest(unittest.TestCase):
+    def test_resolves_unique_copy_by_exact_basename(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            copy = root / "mfa" / "speaker" / "clip.wav"
+            copy.parent.mkdir(parents=True)
+            copy.write_bytes(b"RIFF-test")
+            resolved, remapped = resolve_audio_path("deleted/clip.wav", [root])
+            self.assertEqual(resolved, copy.resolve())
+            self.assertTrue(remapped)
+
+    def test_conflicting_duplicate_names_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a" / "clip.wav"
+            second = root / "b" / "clip.wav"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                resolve_audio_path("deleted/clip.wav", [root])
 
 
 if __name__ == "__main__":

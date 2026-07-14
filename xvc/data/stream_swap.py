@@ -6,9 +6,57 @@ helpers in this module never alter training audio, manifests, or model weights.
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+
+
+def resolve_audio_path(
+    recorded_path: str | Path, search_roots: Sequence[str | Path]
+) -> tuple[Path, bool]:
+    """Resolve a stale manifest path without silently choosing another clip.
+
+    The original path wins when it exists. Otherwise, exact-basename matches
+    are collected below ``search_roots``. Multiple byte-identical copies are
+    safe; conflicting copies fail closed because choosing one would invalidate
+    a causal audio comparison.
+    """
+
+    recorded = Path(recorded_path)
+    if recorded.is_file():
+        return recorded, False
+
+    candidates: list[Path] = []
+    for root_value in search_roots:
+        root = Path(root_value)
+        if not root.is_dir():
+            continue
+        candidates.extend(path for path in root.rglob(recorded.name) if path.is_file())
+    candidates = sorted(set(path.resolve() for path in candidates))
+    if not candidates:
+        roots = ", ".join(str(Path(root)) for root in search_roots)
+        raise FileNotFoundError(
+            f"audio path is stale and {recorded.name!r} was not found under: {roots}"
+        )
+    if len(candidates) == 1:
+        return candidates[0], True
+
+    def digest(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                hasher.update(block)
+        return hasher.hexdigest()
+
+    hashes = {digest(path) for path in candidates}
+    if len(hashes) != 1:
+        formatted = "\n  ".join(str(path) for path in candidates)
+        raise ValueError(
+            f"ambiguous non-identical copies for {recorded.name!r}:\n  {formatted}"
+        )
+    return candidates[0], True
 
 
 def build_phone_frame_map(

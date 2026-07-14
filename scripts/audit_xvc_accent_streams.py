@@ -104,6 +104,12 @@ def main(argv=None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-pairs", type=int, default=40)
     parser.add_argument("--min-phone-segments", type=int, default=5)
+    parser.add_argument(
+        "--audio-search-root",
+        action="append",
+        default=None,
+        help="fallback root for stale pair-shard audio paths; repeatable (default: data)",
+    )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
@@ -119,7 +125,7 @@ def main(argv=None) -> int:
         to_numpy_audio,
     )
     from models.codec.sac.utils import process_audio
-    from xvc.data.stream_swap import build_phone_frame_map
+    from xvc.data.stream_swap import build_phone_frame_map, resolve_audio_path
 
     out = Path(args.out)
     if out.exists() and any(out.rglob("*.wav")) and not args.overwrite:
@@ -137,6 +143,7 @@ def main(argv=None) -> int:
     if not items:
         raise SystemExit("[error] no qualifying phone-annotated target-speaker pairs")
     print(f"[audit] selected {len(items)} {args.target_speaker} pair(s) from {args.split}")
+    audio_search_roots = args.audio_search_root or ["data"]
 
     cfg, model, device = load_xvc(args.config, args.ckpt, args.device, False)
     _, reference_wav, reference_cond = load_pair_as_tensors(
@@ -188,9 +195,29 @@ def main(argv=None) -> int:
     pair_metadata: list[dict[str, Any]] = []
 
     for index, item in enumerate(items, start=1):
-        source_path = _path(item, "source_wav_path")
-        target_path = _path(item, "target_wav_path")
-        name = _utterance(item, source_path)
+        recorded_source_path = _path(item, "source_wav_path")
+        recorded_target_path = _path(item, "target_wav_path")
+        try:
+            source_resolved, source_remapped = resolve_audio_path(
+                recorded_source_path, audio_search_roots
+            )
+            target_resolved, target_remapped = resolve_audio_path(
+                recorded_target_path, audio_search_roots
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise SystemExit(
+                f"[error] cannot recover pristine audio for pair {index}: {exc}\n"
+                "Restore/upload the phone-aware MFA corpus and rerun with "
+                "--audio-search-root data/mfa_hindi_phoneaware_asi/mfa_corpus"
+            ) from exc
+        source_path = str(source_resolved)
+        target_path = str(target_resolved)
+        if source_remapped or target_remapped:
+            print(
+                f"  [path repair] {Path(recorded_source_path).name} -> {source_path}; "
+                f"{Path(recorded_target_path).name} -> {target_path}"
+            )
+        name = _utterance(item, recorded_source_path)
         filename = f"{name}__streamswap.wav"
 
         native_sem, native_zq = encode(source_path)
@@ -239,6 +266,9 @@ def main(argv=None) -> int:
                 "source_utt": name,
                 "source_wav_path": source_path,
                 "target_wav_path": target_path,
+                "recorded_source_wav_path": recorded_source_path,
+                "recorded_target_wav_path": recorded_target_path,
+                "audio_path_remapped": bool(source_remapped or target_remapped),
                 "native_frames": native_frames,
                 "target_frames": target_frames,
                 "phone_segments": len(item["phone_segments"]),
@@ -271,6 +301,7 @@ def main(argv=None) -> int:
             "acoustic_codes": "nearest-frame sampling at the same positions",
             "training_use": "prohibited; diagnostic only",
         },
+        "audio_search_roots": audio_search_roots,
         "conditions": CONDITIONS,
         "pairs": pair_metadata,
     }

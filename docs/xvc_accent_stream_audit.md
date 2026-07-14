@@ -50,6 +50,13 @@ Set `SCORE=0` to render/listen without loading the metric models. Set
 `MAX_PAIRS=10` for a short smoke test. Outputs are experiment artifacts under
 `exp/` and are intentionally ignored by git.
 
+Pair-feature shards may retain paths to an older dataset directory. The audit
+searches `data/` for an exact basename and accepts multiple matches only when
+their bytes are identical. If the original cross-pair root was deleted, unpack
+the pristine phone-aware MFA `mfa_corpus` under `data/`; no latent-aligned
+training dataset needs to be restored. Use repeated `--audio-search-root`
+arguments to restrict or extend the search.
+
 ## Decision rules
 
 - `asi_sem__native_zq` becomes convincingly Indian while the native control
