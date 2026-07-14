@@ -7,6 +7,10 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# Self-contained env activation: launching from (base) must not matter.
+source /opt/conda/etc/profile.d/conda.sh
+conda activate xvc
+
 python scripts/make_selfpair_manifest.py \
   --from-manifest data/crosspair_hindi_latent_wide_asionly/manifests/train.jsonl \
   --from-manifest data/crosspair_hindi_latent_wide_asionly/manifests/val.jsonl \
