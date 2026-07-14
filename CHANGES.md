@@ -1707,3 +1707,44 @@ their gate-filtered teacher dataset. This is a teacher-depth comparison, not a
 rank/LR sweep. A gate failure skips that student and continues to the other
 candidate. `TRAIN_PASSING=0` provides a render-and-gate-only mode, and
 `REUSE_INTERMEDIATE_RENDER=1` safely reuses complete render manifests.
+
+## Genuine phone-aware target realization (2026-07-14)
+
+Added a separate, opt-in AccentBridge experiment for the remaining causal
+hypothesis: pronunciation edits may need supervision at phone interiors rather
+than larger LoRA/teacher scale. This is not the previous MFA run. That run
+requested phones but fell back to word tiers; word-MFA had worse alignment QC
+than DTW and poor conversion results.
+
+`scripts/annotate_accentbridge_phone_supervision.py` now requires genuine
+source and target phone tiers and sequence-aligns corresponding phones. MFA is
+metadata only: native audio and features are never warped or resampled. The
+annotator adaptively trims uncertain boundaries, rejects extreme phone-duration
+ratios, and derives stable phone-level realization weights from
+onset/middle/offset and variance differences. It fails closed on word-only
+TextGrids, low phone-label agreement, missing grids, insufficient usable phones,
+or less than 80% retained coverage in either train or validation.
+
+`scripts/train_accentbridge.py --phone-aware` consumes pristine native-timeline
+features and matches the bridge's target-relative edit over three temporal
+regions of each phone plus whole-phone variance. It retains identity,
+smoothness, and residual-delta anchors. Normal training behavior is unchanged
+without the flag; combining the old frame-gap weighting with phone-aware
+weighting is rejected as a confounded experiment. Phone-aware checkpoints
+retain the existing AccentBridge architecture/config schema, so rendering and
+streaming inference need no MFA and remain compatible with
+`make_distill_dataset.py`.
+
+`scripts/run_phoneaware_accentbridge_sweep.sh` pre-registers three conservative
+arms (`lambda_phone` 0.1, 0.25, 0.5), with L10 as the external baseline. The
+trainer now writes TensorBoard events, raw CSV curves, validation CSV, and a
+static PNG so loss components, identity drift, gradient norm, and validation
+phone-gap closure can be audited together. See
+`docs/phoneaware_accentbridge.md` for inputs and decision rules.
+
+`scripts/run_phoneaware_mfa_queue.sh` now queues source/target validation and
+alignment, then calls `audit_mfa_phone_tiers.py` and archives only the MFA
+outputs needed on the training machine. The queue fails on missing corpora,
+WAV/transcript count mismatch, missing MFA executable, pre-existing ambiguous
+outputs, or any TextGrid without a genuine phone tier. It does not construct a
+time map and never launches training automatically from the MFA environment.
