@@ -1,0 +1,20 @@
+# ASI-persona LoRA fine-tune, rank 4 of the r1/r2/r4 low-rank sweep
+# (alpha fixed at 16 => scaling 4; see CHANGES.md "Target-conditioned
+# low-rank LoRA sweep").
+#
+# Legacy equivalent (resolved-tree identical, verified by
+# tests/unit/test_config_composition.py):
+#   configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16.yaml
+#
+# Run: python scripts/train.py experiment=lora_hindi_asi_r4
+defaults:
+  - model/xvc_16k
+  - adapter/lora_acoustic
+  - dataset/crosspair_hindi_latent_400_asi
+  - training/lora_sweep_short
+  - _self_
+
+model:
+  generator:
+    lora:
+      r: 4      # the one knob of this arm (alpha stays 16 => scaling 4)

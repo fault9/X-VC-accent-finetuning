@@ -1,0 +1,10 @@
+# "Option A" Hindi baseline: warm-start the released checkpoint, freeze
+# everything except acoustic_converter + prenet (full weights), train in
+# self-reconstruction mode. See CHANGES.md "How we fine-tune X-VC for accents".
+# Legacy: configs/finetune_hindi.yaml
+defaults:
+  - model/xvc_16k
+  - adapter/full_acoustic_prenet
+  - dataset/selfrecon_hindi
+  - training/option_a_selfrecon
+  - _self_

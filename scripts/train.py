@@ -106,6 +106,9 @@ def _maybe_validate_dataset(cfg, min_duration_env: str) -> None:
 
 
 def main(argv=None) -> int:
+    # Config-internal paths (base_config, datasets, checkpoints) are repo-root
+    # relative throughout this repo; behave the same from any invocation dir.
+    os.chdir(REPO_ROOT)
     overrides, passthrough = parse_key_value_args(
         sys.argv[1:] if argv is None else argv
     )
@@ -199,7 +202,6 @@ def main(argv=None) -> int:
         print("[train] dry_run=true: config resolved, validated, and saved; "
               "run metadata written; not launching torchrun.")
         return 0
-    os.chdir(REPO_ROOT)
     os.execvp(runtime[0], runtime)
 
 

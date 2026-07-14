@@ -1,0 +1,19 @@
+# Adapter group: LoRA on the acoustic_converter only (base frozen).
+#
+# The include set covers converter attention (both the x-stream and the
+# reference-stream projections to_q_c/to_k_c/to_v_c/to_out_c match "attn.")
+# and both FFNs — the proven set from the r8/r16 pilots and the low-rank
+# sweep (CHANGES.md "Target-conditioned low-rank LoRA sweep").
+#
+# rank/alpha defaults follow the original pilot (r8, alpha 16 => scaling 2.0);
+# experiments override `model.generator.lora.r` (and lr) per arm.
+model:
+  generator:
+    trainable_modules: [acoustic_converter]   # LoRA-host module (base frozen)
+    lora:
+      enabled: true
+      r: 8
+      alpha: 16
+      dropout: 0.0
+      target_modules: [acoustic_converter]
+      include: ["attn.", "ff_x.ff", "ff_c.ff"]
