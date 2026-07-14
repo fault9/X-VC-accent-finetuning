@@ -52,3 +52,6 @@ pretrained/
 # Keep folder placeholders if needed
 !data/.gitkeep
 !pretrained/.gitkeep
+
+# Claude Code project notes (local only)
+CLAUDE.md
