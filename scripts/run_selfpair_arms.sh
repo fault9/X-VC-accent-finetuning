@@ -28,14 +28,17 @@ mkdir -p exp/finetune_asi_recononly_wide_lora_r4_alpha16 \
          exp/finetune_stackdistill_hindi_asi_v4_realanchor_lora_r4_alpha16 \
          exp/run_logs
 
-bash scripts/run_guarded_train_eval.sh \
-  --accent asi_selfpairs_wide \
-  --config configs/finetune_asi_recononly_wide_lora_r4_alpha16.yaml \
-  --log_dir exp/finetune_asi_recononly_wide_lora_r4_alpha16 \
-  --source_dir data/eval_sources_reserved \
-  --evaluation_plan configs/eval_hindi_native_to_asi.json \
-  --validate_min_duration 2.0 \
-  --steps 100,200,400,600,800,1000
+# SKIP_ARM1=1 reruns only the v4 student (arm 1 completed 2026-07-14).
+if [ "${SKIP_ARM1:-0}" != "1" ]; then
+  bash scripts/run_guarded_train_eval.sh \
+    --accent asi_selfpairs_wide \
+    --config configs/finetune_asi_recononly_wide_lora_r4_alpha16.yaml \
+    --log_dir exp/finetune_asi_recononly_wide_lora_r4_alpha16 \
+    --source_dir data/eval_sources_reserved \
+    --evaluation_plan configs/eval_hindi_native_to_asi.json \
+    --validate_min_duration 2.0 \
+    --steps 100,200,400,600,800,1000
+fi
 
 bash scripts/run_guarded_train_eval.sh \
   --accent stackdistill_hindi_asi_l10 \
