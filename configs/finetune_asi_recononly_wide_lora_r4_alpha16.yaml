@@ -1,0 +1,60 @@
+# RECON-ONLY baseline -- PERSONA MODE ASI (Hindi M). The "no pairs at all" arm:
+# LoRA fine-tune on nothing but real ASI recordings (self-pairs from the target
+# side of the wide cross-pair set, ~19 min after QC + eval-prompt exclusion).
+# No DTW, no bridge, no distill renders -- pure self-reconstruction, i.e. the
+# supervisor hypothesis that "normal LoRA on the acoustic should work".
+#
+# Registered prediction (before data): sim/texture up, accent labels ~= base
+# (us/england from the source) -- the base objective's equilibrium keeps accent
+# in the content stream, which passes through untouched. If accent DOES move,
+# the pairwise apparatus was overkill and we want to know.
+#
+# Same LoRA recipe as the shipped students (r4/alpha16, converter+prenet,
+# lr 1e-4); dataset + recon 1.0 + 1000 steps are the only differences.
+#
+# Dataset built by scripts/make_selfpair_manifest.py from
+# data/crosspair_hindi_latent_wide_asionly (see selfpair_meta.json).
+
+base_config: configs/xvc.yaml
+reference_duration: 3.0
+
+datasets:
+  train:
+    - data/asi_selfpairs_wide/manifests/train.jsonl
+  val:
+    - data/asi_selfpairs_wide/manifests/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 1.0     # every example: source == target (self-recon)
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  latent_alignment: false
+  static:
+    batch_size: 8
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 100
+save_interval: 100
+keep_interval: 100
+total_step: 1000
+
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter, prenet]
+    lora:
+      enabled: true
+      r: 4
+      alpha: 16
+      dropout: 0.0
+      target_modules: [acoustic_converter, prenet]
+      # converter attention + FFN + AdaLN modulation, prenet pwconv:
+      include: ["attn.", "ff_x.ff", "ff_c.ff", "attn_norm_x.", "norm_out.", "pwconv"]
+    optim_conf:
+      lr: 0.0001
