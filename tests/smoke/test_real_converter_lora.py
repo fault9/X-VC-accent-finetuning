@@ -95,7 +95,7 @@ def test_config_include_patterns_match_real_layers():
     assert any(".ff_x.ff" in n for n in report.adapted_layers)
     assert any(".ff_c.ff" in n for n in report.adapted_layers)
     # AdaLN projections are NOT in this set (they're the separate arm below).
-    assert not any("attn_norm_x" in n for n in report.adapted_layers), per_block
+    assert not any("attn_norm_x" in n for n in report.adapted_layers)
 
 
 def test_adaln_include_set_targets_modulation_projections():
