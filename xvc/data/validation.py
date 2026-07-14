@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import wave
@@ -123,6 +124,8 @@ def _empty_report() -> dict:
         "rubberband_version": None,
         "rubberband_engine": None,
         "alignment_qc_rows": 0,
+        "not_frame_synchronous": False,
+        "checksums_verified": 0,
         "failures": 0,
     }
 
@@ -133,6 +136,7 @@ def validate_crosspair_dataset(
     thresholds = thresholds or Thresholds()
     root = Path(data_root)
     align_meta = _load_json(root / "align_meta.json")
+    dataset_meta = _load_json(root / "dataset_meta.json")
     qc_path = root / "alignment_qc.jsonl"
     qc_rows = (
         [
@@ -165,6 +169,11 @@ def validate_crosspair_dataset(
         )
     paired_prompts = prompts["train"] | prompts["val"] | EVAL_PROMPTS
     latent_mode = align_meta.get("warp_method") == "latent"
+    not_frame_synchronous = bool(dataset_meta.get("not_frame_synchronous", False))
+    if latent_mode and not_frame_synchronous:
+        failures.append(
+            "dataset cannot be both latent-aligned and declared non-frame-synchronous"
+        )
     required_for_mode = required_manifest_fields_for_meta(align_meta)
 
     seen_targets: set[Path] = set()
@@ -203,18 +212,35 @@ def validate_crosspair_dataset(
                 failures.append(
                     f"{label}: sample rates source={source_rate}, target={target_rate}"
                 )
-            if len(source_audio) != len(target_audio) and not latent_mode:
+            if (
+                len(source_audio) != len(target_audio)
+                and not latent_mode
+                and not not_frame_synchronous
+            ):
                 failures.append(
                     f"{label}: duration mismatch source={len(source_audio)}, "
                     f"target={len(target_audio)} samples"
                 )
-            duration = len(target_audio if latent_mode else source_audio) / source_rate
-            durations.append(duration)
-            if duration < thresholds.min_duration:
-                failures.append(
-                    f"{label}: duration {duration:.3f}s < "
-                    f"{thresholds.min_duration:.3f}s"
-                )
+            if not_frame_synchronous:
+                side_durations = {
+                    "source": len(source_audio) / source_rate,
+                    "target": len(target_audio) / target_rate,
+                }
+                durations.extend(side_durations.values())
+                for side, duration in side_durations.items():
+                    if duration < thresholds.min_duration:
+                        failures.append(
+                            f"{label}: {side} duration {duration:.3f}s < "
+                            f"{thresholds.min_duration:.3f}s"
+                        )
+            else:
+                duration = len(target_audio if latent_mode else source_audio) / source_rate
+                durations.append(duration)
+                if duration < thresholds.min_duration:
+                    failures.append(
+                        f"{label}: duration {duration:.3f}s < "
+                        f"{thresholds.min_duration:.3f}s"
+                    )
             for field in ("raw_source_duration", "raw_target_duration"):
                 if field in row and float(row[field]) < thresholds.min_duration:
                     failures.append(
@@ -379,6 +405,32 @@ def validate_crosspair_dataset(
         for source_utt, row in qc_by_source.items():
             failures.extend(check_qc_row(source_utt, row, gates))
 
+    checksums_verified = 0
+    checksum_path = root / "checksums.sha256"
+    if checksum_path.is_file():
+        root_resolved = root.resolve()
+        for lineno, line in enumerate(
+            checksum_path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if not line.strip():
+                continue
+            try:
+                expected, relative = line.split(maxsplit=1)
+                candidate = (root / relative.strip()).resolve()
+                if not candidate.is_relative_to(root_resolved):
+                    raise ValueError("path escapes dataset root")
+                if not candidate.is_file():
+                    raise FileNotFoundError(candidate)
+                digest = hashlib.sha256()
+                with candidate.open("rb") as handle:
+                    for block in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(block)
+                if digest.hexdigest() != expected:
+                    raise ValueError("SHA-256 mismatch")
+                checksums_verified += 1
+            except Exception as exc:
+                failures.append(f"checksums.sha256:{lineno}: {exc}")
+
     report = {
         "schema_version": CROSSPAIR_SCHEMA_VERSION,
         "train_pairs": len(splits["train"]),
@@ -404,6 +456,8 @@ def validate_crosspair_dataset(
         "rubberband_version": align_meta.get("rubberband_version"),
         "rubberband_engine": align_meta.get("rubberband_engine"),
         "alignment_qc_rows": len(qc_rows),
+        "not_frame_synchronous": not_frame_synchronous,
+        "checksums_verified": checksums_verified,
         "failures": len(failures),
     }
     return ValidationResult(report, failures)

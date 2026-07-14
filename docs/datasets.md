@@ -119,3 +119,9 @@ recordings are parallel by prompt but not frame-synchronous. Consequently it
 is valid for stream localization and alignment-aware phone/token objectives,
 but not direct frame-wise waveform regression without an alignment-aware
 objective.
+
+`validate_crosspairs.py` reads `dataset_meta.json`. For a dataset explicitly
+marked `not_frame_synchronous`, it validates source and target durations
+independently instead of incorrectly requiring equal sample counts. All other
+audio, split, path, and QC checks remain active, and a present
+`checksums.sha256` is verified in full.

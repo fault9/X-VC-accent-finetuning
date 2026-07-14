@@ -1795,3 +1795,7 @@ native and ASI recordings, transcripts, and genuine phone-tier TextGrids;
 preserves prompt-disjoint train/validation manifests; and writes complete
 SHA-256 checksums. It never uses symlinks, DTW, warping, or resampling, and its
 metadata warns that prompt-parallel recordings are not frame-synchronous.
+The shared validator now honors that explicit declaration by checking source
+and target durations independently instead of demanding equal sample counts;
+all remaining audio/split/path checks stay active, and canonical SHA-256
+manifests are verified in full.
