@@ -1786,3 +1786,12 @@ feature becomes training data and no weight is updated. A one-pass metric run
 produces MOS, WER, speaker-similarity, and accent summaries for all five
 conditions. Pure mapping tests cover identity, duration scaling, monotonicity,
 and fail-closed behavior. See `docs/xvc_accent_stream_audit.md`.
+
+### Canonical pristine Hindi/ASI dataset
+
+Added `build_pristine_parallel_dataset.py` to promote the already validated MFA
+corpus into a relocatable long-lived dataset. It copies pristine mono/16 kHz
+native and ASI recordings, transcripts, and genuine phone-tier TextGrids;
+preserves prompt-disjoint train/validation manifests; and writes complete
+SHA-256 checksums. It never uses symlinks, DTW, warping, or resampling, and its
+metadata warns that prompt-parallel recordings are not frame-synchronous.

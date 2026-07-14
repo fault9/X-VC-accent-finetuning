@@ -93,3 +93,29 @@ prepare_phoneaware_mfa_corpus.py
 
 The full ASI procedure and quality gates are in
 [`phoneaware_accentbridge.md`](phoneaware_accentbridge.md).
+
+## Canonical pristine Hindi/ASI parallel dataset
+
+After MFA succeeds, promote its copied corpus into the durable dataset used by
+audits and future pronunciation/token supervision:
+
+```bash
+python scripts/build_pristine_parallel_dataset.py \
+  --prepared-root data/mfa_hindi_phoneaware_asi \
+  --out data/hindi_asi_pristine_parallel_221 \
+  --path-prefix data/hindi_asi_pristine_parallel_221 \
+  --target-speaker ASI \
+  --min-duration 2.6
+
+python scripts/validate_crosspairs.py \
+  --data-root data/hindi_asi_pristine_parallel_221 \
+  --min-duration 2.6
+```
+
+The builder copies rather than symlinks audio, retains transcripts and true
+phone-tier TextGrids, preserves the prompt-disjoint split, writes relocatable
+paths, and checksums every file. It records explicitly that the natural
+recordings are parallel by prompt but not frame-synchronous. Consequently it
+is valid for stream localization and alignment-aware phone/token objectives,
+but not direct frame-wise waveform regression without an alignment-aware
+objective.
