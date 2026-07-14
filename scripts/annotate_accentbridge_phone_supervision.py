@@ -21,9 +21,9 @@ from collections import defaultdict
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent))
 
-from phone_supervision import align_phone_sequences, index_textgrids, phone_tier
+from xvc.data.phone_supervision import align_phone_sequences, index_textgrids, phone_tier
 
 
 def _frame_range(interval, duration, frames):

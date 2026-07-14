@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xvc-accent-finetuning"
+version = "0.1.0"
+description = "X-VC voice conversion — accent fine-tuning library (LoRA adapters, dataset validation, config and checkpoint tooling)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    # Deliberately minimal: only what the `xvc` package itself imports.
+    # The full training stack (deepspeed, transformers, audiotools, ...)
+    # stays in requirements.txt — install it for training/inference.
+    "torch",
+    "numpy",
+    "omegaconf>=2.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+# Only the self-contained `xvc` package is installed. The legacy top-level
+# packages (models/, utils/, bins/) keep their repo-root-relative import paths
+# on purpose: every saved run config carries `_target_:
+# models.codec.sac. ...` strings and historical scripts bootstrap sys.path —
+# installing packages named `utils` or `models` site-wide would shadow other
+# projects. Run legacy entry points from the repo root, as before.
+[tool.setuptools.packages.find]
+include = ["xvc*"]
+
+[tool.ruff]
+line-length = 100
+# Legacy/vendored code is linted only where we actively maintain it.
+extend-exclude = ["models/codec/sac/third_party"]
+
+[tool.ruff.lint]
+# Conservative: syntax errors, undefined names, and always-true assumptions
+# only. No style rules — formatting churn must never mix with behavior.
+select = ["E9", "F63", "F7", "F82", "F821"]

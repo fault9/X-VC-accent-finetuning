@@ -163,6 +163,38 @@ the released X-VC checkpoint.
 
 - **Method and rationale (for reviewers):** [`CHANGES.md`](CHANGES.md)
 - **Step-by-step operator guide:** [`docs/finetuning.md`](docs/finetuning.md)
+- **Phone-aware AccentBridge experiment:**
+  [`docs/phoneaware_accentbridge.md`](docs/phoneaware_accentbridge.md)
+- **Hindi/ASI semantic-vs-acoustic stream audit:**
+  [`docs/xvc_accent_stream_audit.md`](docs/xvc_accent_stream_audit.md)
+- **Code architecture / refactor map:** [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md),
+  [`docs/architecture.md`](docs/architecture.md)
+
+### Consolidated entry points
+
+```bash
+pip install -e .                                   # installs the xvc package
+pytest tests/                                      # CPU test suite (no GPU, no checkpoints)
+
+python scripts/train.py experiment=lora_hindi_asi_r4          # train (see docs/training.md)
+python scripts/infer.py checkpoint=exp/<run>/ckpt/000100.pt \
+    source=src.wav target=ref.wav output=out.wav              # convert (docs/inference.md)
+python scripts/validate_dataset.py data/<crosspair_root>      # dataset preflight
+python scripts/inspect_checkpoint.py <file.pt>                # what is in this checkpoint?
+```
+
+Experiments compose config groups under
+`configs/{model,adapter,dataset,training,experiment}/`
+([`configs/LEGACY_MAPPING.md`](configs/LEGACY_MAPPING.md)); LoRA / freezing /
+dataset-schema / checkpoint utilities live in the `xvc/` package
+([`docs/lora.md`](docs/lora.md), [`docs/datasets.md`](docs/datasets.md),
+[`docs/checkpoints.md`](docs/checkpoints.md)). All historical commands keep
+working — see [`MIGRATION.md`](MIGRATION.md).
+
+Reusable phone-tier parsing and sequence matching live in
+`xvc.data.phone_supervision`; MFA corpus preparation, alignment, annotation,
+and controlled sweep commands remain explicit operator scripts under
+`scripts/`.
 
 Quick start:
 

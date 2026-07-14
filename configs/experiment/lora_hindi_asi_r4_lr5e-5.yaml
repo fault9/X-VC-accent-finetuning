@@ -1,0 +1,15 @@
+# LR leg of the winning rank: r4 at lr 5e-5.
+# Legacy: configs/finetune_crosspair_hindi_latent_400_asi_lora_acoustic_r4_alpha16_lr5e-5.yaml
+defaults:
+  - model/xvc_16k
+  - adapter/lora_acoustic
+  - dataset/crosspair_hindi_latent_400_asi
+  - training/lora_sweep_short
+  - _self_
+
+model:
+  generator:
+    lora:
+      r: 4
+    optim_conf:
+      lr: 0.00005

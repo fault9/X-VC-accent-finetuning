@@ -1,16 +1,22 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from phone_supervision import align_phone_sequences, phone_tier, read_textgrid
 from annotate_accentbridge_phone_supervision import (
     _resolve_textgrid,
     _target_speaker_matches,
     _trim_range,
+)
+from xvc.data.phone_supervision import (
+    align_phone_sequences,
+    phone_tier,
+    read_textgrid,
 )
 
 
@@ -61,10 +67,10 @@ class PhoneSupervisionTest(unittest.TestCase):
             self.assertEqual(set(tiers), {"words", "phones"})
             name, phones, duration = phone_tier(path)
             self.assertEqual(name, "phones")
-            self.assertEqual([p.label for p in phones], ["EH1", "S"])
+            self.assertEqual([phone.label for phone in phones], ["EH1", "S"])
             self.assertEqual(duration, 1.0)
             pairs, rate = align_phone_sequences(phones, phones)
-            self.assertEqual([p[2] for p in pairs], ["eh", "s"])
+            self.assertEqual([pair[2] for pair in pairs], ["eh", "s"])
             self.assertEqual(rate, 1.0)
 
     def test_word_only_grid_is_rejected(self):
@@ -82,14 +88,21 @@ class PhoneSupervisionTest(unittest.TestCase):
     def test_target_textgrid_resolves_from_speaker_and_prompt(self):
         expected = Path("ASI_arctic_a0042.TextGrid")
         index = {"ASI_arctic_a0042": expected}
-        meta = {"target_wav_path": "derived/ASI__bdl_a0042_ft.wav",
-                "target_utt": "ASI__bdl_a0042", "target_speaker": "ASI",
-                "prompt": "a0042"}
+        meta = {
+            "target_wav_path": "derived/ASI__bdl_a0042_ft.wav",
+            "target_utt": "ASI__bdl_a0042",
+            "target_speaker": "ASI",
+            "prompt": "a0042",
+        }
         self.assertEqual(_resolve_textgrid(index, meta, "target"), expected)
 
     def test_target_filter_accepts_composite_extractor_label(self):
-        self.assertTrue(_target_speaker_matches({"target_speaker": "ASI__bdl"}, "ASI"))
-        self.assertFalse(_target_speaker_matches({"target_speaker": "TNI__clb"}, "ASI"))
+        self.assertTrue(
+            _target_speaker_matches({"target_speaker": "ASI__bdl"}, "ASI")
+        )
+        self.assertFalse(
+            _target_speaker_matches({"target_speaker": "TNI__clb"}, "ASI")
+        )
 
 
 if __name__ == "__main__":

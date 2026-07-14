@@ -10,9 +10,14 @@ from collections import Counter
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent))
 
-from phone_supervision import index_textgrids, normalize_phone, phone_tier, read_textgrid
+from xvc.data.phone_supervision import (
+    index_textgrids,
+    normalize_phone,
+    phone_tier,
+    read_textgrid,
+)
 
 
 def audit(root: Path):

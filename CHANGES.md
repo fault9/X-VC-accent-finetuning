@@ -1762,3 +1762,27 @@ queue exposes a conservative `MFA_NUM_JOBS` setting (default 4).
 Phone-supervision annotation now applies the requested target-speaker filter
 before computing coverage, so mixed ASI/TNI feature shards can be supervised
 against an intentionally ASI-only MFA corpus without counting TNI as missing.
+
+### Repository-structure integration
+
+The phone-aware branch now incorporates the package/config/entry-point/test
+layout from `target-conditioned-lowrank-lora`. Reusable phone supervision
+lives under `xvc.data`, operator scripts remain stable compatibility entry
+points, and phone tests follow `tests/unit`. During integration we found that
+the refactor's unanchored `data/` ignore rule had silently excluded the
+documented `xvc/data` schema and validator modules; the ignore is root-anchored
+and the missing package is restored here before adopting the new validator
+wrappers.
+
+### Causal semantic/acoustic stream localization audit
+
+Added `audit_xvc_accent_streams.py` and
+`run_xvc_accent_stream_audit.sh` to test where source pronunciation is carried
+before building another accent model. The audit independently substitutes real
+ASI semantic activations and real ASI quantized-acoustic activations at X-VC's
+50 Hz concatenation point, with native/native and original-timeline ASI
+round-trip controls. MFA phones provide only a diagnostic frame map; no mapped
+feature becomes training data and no weight is updated. A one-pass metric run
+produces MOS, WER, speaker-similarity, and accent summaries for all five
+conditions. Pure mapping tests cover identity, duration scaling, monotonicity,
+and fail-closed behavior. See `docs/xvc_accent_stream_audit.md`.
