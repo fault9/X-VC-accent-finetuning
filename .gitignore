@@ -55,3 +55,5 @@ pretrained/
 
 # Claude Code project notes (local only)
 CLAUDE.md
+MIGRATION.md
+CHANGES.md
