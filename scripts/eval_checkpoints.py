@@ -244,7 +244,16 @@ class AccentClassifier:
         import torch
 
         out_prob, score, index, label = self.clf.classify_file(wav_path)
-        probabilities = out_prob.detach().float().exp().reshape(-1)
+        # SpeechBrain documents ``out_prob`` as log posteriors, while older
+        # ECAPA model/interface combinations can expose unnormalised cosine
+        # scores. Softmax is correct for both representations and guarantees
+        # a real 16-way probability distribution.
+        scores = out_prob.detach().float().reshape(-1)
+        probabilities = torch.softmax(scores, dim=0)
+        if not torch.isfinite(probabilities).all():
+            raise RuntimeError("CommonAccent returned non-finite class scores")
+        if abs(float(probabilities.sum().item()) - 1.0) > 1e-5:
+            raise RuntimeError("CommonAccent posterior did not normalize to one")
         encoder = self.clf.hparams.label_encoder
         labels = list(encoder.decode_torch(torch.arange(probabilities.numel())))
         posterior = {
