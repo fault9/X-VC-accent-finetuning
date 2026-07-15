@@ -1,7 +1,8 @@
-"""Pure helpers for causal X-VC semantic/acoustic stream-swap audits.
+"""Pure helpers for X-VC stream audits and phone-annotated supervision.
 
-MFA phone intervals are used only to construct a diagnostic time map.  The
-helpers in this module never alter training audio, manifests, or model weights.
+MFA phone intervals either construct a diagnostic map or select corresponding
+regions on two pristine timelines. The helpers never alter audio, features,
+manifests, or model weights.
 """
 
 from __future__ import annotations
@@ -13,6 +14,66 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from xvc.data.phone_supervision import align_phone_sequences, phone_tier
+
+
+def matched_phone_intervals_from_textgrids(
+    source_textgrid: str | Path,
+    target_textgrid: str | Path,
+    *,
+    min_label_match: float = 0.90,
+    min_matched_phones: int = 5,
+    min_duration_ratio: float = 0.5,
+    max_duration_ratio: float = 2.0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return corresponding phone intervals on their pristine time axes.
+
+    The intervals are annotations only. They are useful for selecting two
+    independent waveform crops around the same phone without making either
+    waveform or feature timeline match the other.
+    """
+    source_path = Path(source_textgrid)
+    target_path = Path(target_textgrid)
+    source_tier, source_phones, source_duration = phone_tier(source_path)
+    target_tier, target_phones, target_duration = phone_tier(target_path)
+    pairs, match_rate = align_phone_sequences(source_phones, target_phones)
+    if match_rate < min_label_match:
+        raise ValueError(
+            f"phone label match {match_rate:.1%} < {min_label_match:.1%}"
+        )
+    matches = []
+    rejected_duration = 0
+    for source_phone, target_phone, label in pairs:
+        duration_ratio = (source_phone.end - source_phone.start) / max(
+            target_phone.end - target_phone.start, 1e-8
+        )
+        if not min_duration_ratio <= duration_ratio <= max_duration_ratio:
+            rejected_duration += 1
+            continue
+        matches.append(
+            {
+                "phone": label,
+                "src_seconds": [source_phone.start, source_phone.end],
+                "tgt_seconds": [target_phone.start, target_phone.end],
+                "duration_ratio": round(duration_ratio, 6),
+                "confidence": round(min(duration_ratio, 1.0 / duration_ratio), 6),
+            }
+        )
+    if len(matches) < min_matched_phones:
+        raise ValueError(
+            f"only {len(matches)} duration-safe matched phones < {min_matched_phones}"
+        )
+    return matches, {
+        "source_textgrid": str(source_path),
+        "target_textgrid": str(target_path),
+        "source_tier": source_tier,
+        "target_tier": target_tier,
+        "source_duration": source_duration,
+        "target_duration": target_duration,
+        "label_match_rate": round(match_rate, 6),
+        "matched_phone_intervals": len(matches),
+        "rejected_duration": rejected_duration,
+        "source_was_warped": False,
+    }
 
 
 def phone_segments_from_textgrids(

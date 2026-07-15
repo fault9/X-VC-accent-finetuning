@@ -53,7 +53,7 @@ class JointAccentMapper(nn.Module):
         acoustic_dim: int = 1024,
         code_dim: int = 8,
         hidden: int = 256,
-        layers: int = 6,
+        layers: int = 5,
         kernel_size: int = 3,
         dilation_growth: int = 2,
         lookahead_frames: int = 4,
@@ -67,6 +67,9 @@ class JointAccentMapper(nn.Module):
         self.semantic_dim = semantic_dim
         self.acoustic_dim = acoustic_dim
         self.code_dim = code_dim
+        self.layers = int(layers)
+        self.kernel_size = int(kernel_size)
+        self.dilation_growth = int(dilation_growth)
         self.lookahead_frames = int(lookahead_frames)
         branch = hidden // 2
         self.semantic_in = nn.Conv1d(semantic_dim, branch, 1)
@@ -90,6 +93,31 @@ class JointAccentMapper(nn.Module):
     @property
     def lookahead_ms(self) -> int:
         return self.lookahead_frames * 20
+
+    @property
+    def receptive_history_frames(self) -> int:
+        return (self.kernel_size - 1) * sum(
+            self.dilation_growth ** index for index in range(self.layers)
+        )
+
+    @property
+    def receptive_history_ms(self) -> int:
+        return self.receptive_history_frames * 20
+
+    def validate_stream_window(
+        self, history_ms: int, smooth_ms: int, future_ms: int
+    ) -> None:
+        available_right_ms = int(smooth_ms) + int(future_ms)
+        if self.receptive_history_ms > int(history_ms):
+            raise ValueError(
+                f"mapper needs {self.receptive_history_ms} ms history, "
+                f"but the stream provides {history_ms} ms"
+            )
+        if self.lookahead_ms > available_right_ms:
+            raise ValueError(
+                f"mapper needs {self.lookahead_ms} ms lookahead, but the existing "
+                f"stream provides only {available_right_ms} ms"
+            )
 
     def n_params(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters())
@@ -157,5 +185,92 @@ class JointAccentMapper(nn.Module):
         return (
             f"semantic_dim={self.semantic_dim}, acoustic_dim={self.acoustic_dim}, "
             f"code_dim={self.code_dim}, lookahead={self.lookahead_frames} frames "
-            f"({self.lookahead_ms} ms), params={self.n_params()/1e6:.2f}M"
+            f"({self.lookahead_ms} ms), history={self.receptive_history_ms} ms, "
+            f"params={self.n_params()/1e6:.2f}M"
         )
+
+
+class PostPrenetAccentMapper(nn.Module):
+    """Residual editor over X-VC's unified post-prenet content stream.
+
+    This stage is immediately before the frozen acoustic converter. It avoids
+    asking two independently edited source streams to become coherent only
+    after concatenation. Zero initialization preserves exact stock X-VC output.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1024,
+        hidden: int = 256,
+        layers: int = 5,
+        kernel_size: int = 3,
+        dilation_growth: int = 2,
+        lookahead_frames: int = 4,
+        input_dropout: float = 0.05,
+    ):
+        super().__init__()
+        if lookahead_frames < 0:
+            raise ValueError("lookahead_frames must be >= 0")
+        self.input_dim = int(input_dim)
+        self.layers = int(layers)
+        self.kernel_size = int(kernel_size)
+        self.dilation_growth = int(dilation_growth)
+        self.lookahead_frames = int(lookahead_frames)
+        self.input_proj = nn.Conv1d(input_dim, hidden, 1)
+        self.input_dropout = nn.Dropout1d(input_dropout)
+        self.blocks = nn.ModuleList(
+            [
+                _CausalResidualBlock(
+                    hidden, kernel_size, dilation_growth ** index
+                )
+                for index in range(layers)
+            ]
+        )
+        self.delta = nn.Conv1d(hidden, input_dim, 1)
+        nn.init.zeros_(self.delta.weight)
+        nn.init.zeros_(self.delta.bias)
+
+    @property
+    def lookahead_ms(self) -> int:
+        return self.lookahead_frames * 20
+
+    @property
+    def receptive_history_frames(self) -> int:
+        return (self.kernel_size - 1) * sum(
+            self.dilation_growth ** index for index in range(self.layers)
+        )
+
+    @property
+    def receptive_history_ms(self) -> int:
+        return self.receptive_history_frames * 20
+
+    def validate_stream_window(
+        self, history_ms: int, smooth_ms: int, future_ms: int
+    ) -> None:
+        if self.receptive_history_ms > int(history_ms):
+            raise ValueError(
+                f"mapper needs {self.receptive_history_ms} ms history, "
+                f"but the stream provides {history_ms} ms"
+            )
+        available_right_ms = int(smooth_ms) + int(future_ms)
+        if self.lookahead_ms > available_right_ms:
+            raise ValueError(
+                f"mapper needs {self.lookahead_ms} ms lookahead, but the existing "
+                f"stream provides only {available_right_ms} ms"
+            )
+
+    def forward(self, hidden: torch.Tensor, *, return_delta: bool = False):
+        x = self.input_dropout(self.input_proj(hidden))
+        lookahead = self.lookahead_frames
+        if lookahead:
+            x = F.pad(x, (0, lookahead))
+        for block in self.blocks:
+            x = block(x)
+        if lookahead:
+            x = x[:, :, lookahead:]
+        delta = self.delta(x)
+        edited = hidden + delta
+        return (edited, delta) if return_delta else edited
+
+    def n_params(self) -> int:
+        return sum(parameter.numel() for parameter in self.parameters())

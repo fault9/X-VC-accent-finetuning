@@ -10,7 +10,8 @@ other source identity.
 X-VC remains responsible for voice conversion:
 
 1. Frozen X-VC source encoders extract semantic and acoustic-code streams.
-2. The small mapper edits both streams through one shared causal trunk.
+2. A small source-agnostic mapper edits either both pre-prenet streams or the
+   unified post-prenet stream.
 3. Frozen X-VC prenet/converter/decoder render them using the normal ASI
    reference, speaker embedding, and frame condition.
 
@@ -64,16 +65,18 @@ cd ~/X-VC
 conda activate xvc
 
 mkdir -p exp/run_logs
-nohup bash scripts/run_joint_persona_mapper_sweep.sh \
-  > exp/run_logs/joint_persona_mapper_asi.out 2>&1 &
+nohup bash scripts/run_persona_mapper_comparison.sh \
+  > exp/run_logs/persona_mapper_comparison_asi.out 2>&1 &
 
-tail -f exp/run_logs/joint_persona_mapper_asi.out
+tail -f exp/run_logs/persona_mapper_comparison_asi.out
 ```
 
-The default controlled sweep trains 0, 80, and 160 ms lookahead arms. It
-extracts paired streams once, evaluates every arm on
-`data/eval_sources_joint_persona_clean`, and
-writes `exp/joint_persona_mapper_asi/status.tsv`. Passing an automatic gate is
+The default controlled comparison trains four arms: pre-prenet discrete and
+post-prenet unified mappers, each with 0 or 80 ms lookahead. The old 160 ms arm
+is excluded because HMO's existing right context is only 120 ms; including it
+would silently add latency. It evaluates every arm through the exact HMO
+`2400/120/20/100` ms overlapping-window path and writes
+`exp/persona_mapper_comparison_asi/status.tsv`. Passing an automatic gate is
 necessary but not sufficient: matched stock/mapper files must also be blindly
 auditioned.
 
@@ -85,7 +88,7 @@ short plumbing smoke test; such a result cannot support an any-source claim.
 Training curves are written in TensorBoard format for every arm:
 
 ```bash
-tensorboard --logdir exp/joint_persona_mapper_asi --bind_all
+tensorboard --logdir exp/persona_mapper_comparison_asi --bind_all
 ```
 
 The checkpoint selector includes the worst validation source-speaker loss, so
@@ -133,8 +136,71 @@ nohup bash scripts/run_joint_persona_discrete_sweep.sh \
 tail -f exp/run_logs/joint_persona_discrete_asi.out
 ```
 
-Defaults are the pre-registered 3x3 matrix: lookahead 0/4/8 frames and
-discrete weights 0.25/0.5/1.0.  This is intentionally a training-objective
+Defaults are a latency-safe 2x2 matrix: lookahead 0/4 frames and discrete
+weights 0.25/0.5. A target-vs-native code-logit margin is also applied on a
+fixed phone-local path, rewarding ASI-directed substitutions instead of code
+churn. This is intentionally a training-objective
 test, not a new architecture or a StreamVoice+ reimplementation.  An arm must
 show positive target-aligned code gain and pass the existing unseen-source
 MOS/WER/similarity/accent gate; matched listening remains decisive.
+
+## Deployment-shaped training and latency contract
+
+The live HMO window contains 120 X-VC frames: 108 history, 6 current, 1 smooth,
+and 5 future frames at 20 ms/frame. This is also the original X-VC training
+duration (`segment_duration: 2.4`). The pair extractor now crops pristine
+source and target **waveforms** independently to 2.4 s before either waveform
+passes through the frozen X-VC encoders. It never encodes a full utterance and
+crops cached features afterward.
+
+The two windows are anchored around the same MFA-matched phone but keep their
+own timing. MFA selects phone regions only; it does not resample a waveform or
+feature stream. With five causal dilated blocks and four lookahead frames, the
+context-valid source interval is `[62, 116)`: about 54 supervised frames per
+window. Every position in that interval has the same receptive context it
+would have in an overlapping live window. Restricting training to the six HMO
+frames emitted on one particular hop would discard most of the clean
+supervision without making the convolution more deployment-faithful.
+
+Both new mappers use five causal dilated blocks. Their 62-frame/1240 ms history
+fits HMO's existing 2160 ms history. Six blocks would need 2520 ms and are
+rejected at training and service startup. Lookahead is checked against the
+existing 120 ms right context.
+
+The post-prenet arm learns a residual after semantic and acoustic streams have
+already been fused, immediately before the frozen acoustic converter. The
+target reference, speaker encoder, converter, and decoder remain unchanged.
+
+No Hear-Me-Out service change is made during this experiment. First evaluate
+candidate checkpoints through `scripts/eval_joint_persona_mapper.py`, which
+uses the exact HMO window geometry. If and only if a checkpoint passes the
+unseen-source, listening, quality, and latency gates, the later HMO integration
+will load it through the optional X-VC runtime loader with metadata checks such
+as:
+
+```bash
+export XVC_PERSONA_MAPPER_CKPT=~/X-VC/exp/persona_mapper_comparison_asi/<arm>/best.pt
+export XVC_PERSONA_TARGET=ASI
+```
+
+That future service integration would load the mapper once, validate
+checkpoint/codebook/persona metadata, and run it inside the existing window.
+It would request no extra audio, and an unset variable would retain stock
+X-VC. These environment variables are not wired into Hear-Me-Out yet.
+
+Evaluation synchronizes CUDA around every streaming window and records stock
+and mapper p50/p95 runtime. An arm fails if mapper p95 adds more than 10 ms or
+if total p95 exceeds the existing 120 ms current-chunk budget.
+
+## Remaining limits
+
+- The length-preserving mapper cannot insert or delete frames. A duration head
+  is justified only after an arm adds audible accent without harming voice.
+- Training currently has two native source speakers. Unseen CLB/SLT evaluation
+  is mandatory, but more training voices would strengthen an "any source" claim.
+- Each training pair currently yields two deterministic 2.4 s source/target
+  windows and each validation pair yields one. This increases window placement
+  diversity without pretending that correlated crops are new speakers.
+- MFA annotations select comparison regions only. They never warp audio.
+- Automatic accent labels are noisy. Final selection requires matched, blinded
+  listening plus the MOS/WER/ASI-similarity gates.

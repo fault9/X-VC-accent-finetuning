@@ -6,6 +6,7 @@ import numpy as np
 
 from xvc.data.stream_swap import (
     build_phone_frame_map,
+    matched_phone_intervals_from_textgrids,
     phone_segments_from_textgrids,
     resolve_audio_path,
 )
@@ -108,6 +109,21 @@ class AudioPathResolutionTest(unittest.TestCase):
 
 
 class TextGridPhoneSegmentTest(unittest.TestCase):
+    def test_returns_pristine_phone_time_axes_without_frame_mapping(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.TextGrid"
+            target = root / "target.TextGrid"
+            source.write_text(TEXTGRID, encoding="utf-8")
+            target.write_text(TEXTGRID, encoding="utf-8")
+            matches, metadata = matched_phone_intervals_from_textgrids(
+                source, target, min_matched_phones=2
+            )
+            self.assertEqual([match["phone"] for match in matches], ["eh", "s"])
+            self.assertEqual(matches[0]["src_seconds"], [0.2, 0.6])
+            self.assertEqual(matches[0]["tgt_seconds"], [0.2, 0.6])
+            self.assertFalse(metadata["source_was_warped"])
+
     def test_derives_segments_without_warping(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

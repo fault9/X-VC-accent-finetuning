@@ -88,6 +88,38 @@ def phonewise_dual_stream_loss(
     return semantic_total / weight_total, code_total / weight_total, phones
 
 
+def phonewise_single_stream_loss(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    phone_segments: list[list[dict]],
+    *,
+    gamma: float = 0.1,
+) -> tuple[torch.Tensor, int]:
+    """Phone-local monotonic loss for a unified post-prenet representation."""
+    total = predicted.new_zeros(())
+    weight_total = 0.0
+    phones = 0
+    for batch_index, segments in enumerate(phone_segments):
+        for segment in segments:
+            source_start, source_end = segment["src"]
+            target_start, target_end = segment["tgt"]
+            if source_end <= source_start or target_end <= target_start:
+                continue
+            weight = float(segment.get("confidence", 1.0))
+            total = total + weight * soft_dtw(
+                cosine_cost(
+                    predicted[batch_index, :, source_start:source_end],
+                    target[batch_index, :, target_start:target_end],
+                ),
+                gamma,
+            )
+            weight_total += weight
+            phones += 1
+    if phones == 0:
+        raise ValueError("batch contains no usable matched phone spans")
+    return total / weight_total, phones
+
+
 def phonewise_discrete_code_loss(
     code_logits: torch.Tensor,
     target_code_indices: torch.Tensor,
@@ -146,6 +178,65 @@ def phonewise_discrete_code_loss(
     if phones == 0:
         raise ValueError("batch contains no usable matched phone spans")
     return total / weight_total, phones
+
+
+def phonewise_target_code_margin_loss(
+    code_logits: torch.Tensor,
+    source_indices: torch.Tensor,
+    target_indices: torch.Tensor,
+    source_code: torch.Tensor,
+    target_code: torch.Tensor,
+    phone_segments: list[list[dict]],
+    *,
+    margin: float = 1.0,
+) -> tuple[torch.Tensor, int]:
+    """Make an aligned target-persona code beat the original source code.
+
+    Alignment is computed once from detached, untouched source/target code
+    embeddings. No waveform or feature is resampled. Positions whose aligned
+    source and target ids are already equal are ignored: this loss asks for
+    target-directed substitutions, not indiscriminate code churn.
+    """
+    if code_logits.ndim != 3:
+        raise ValueError("code_logits must be (batch, source_frames, codes)")
+    if margin <= 0:
+        raise ValueError("margin must be positive")
+    total = code_logits.new_zeros(())
+    weight_total = 0.0
+    positions = 0
+    source_ids_cpu = source_indices.detach().cpu()
+    target_ids_cpu = target_indices.detach().cpu()
+    for batch_index, segments in enumerate(phone_segments):
+        for segment in segments:
+            source_start, source_end = segment["src"]
+            target_start, target_end = segment["tgt"]
+            if source_end <= source_start or target_end <= target_start:
+                continue
+            path = hard_dtw_path(
+                cosine_cost(
+                    source_code[batch_index, :, source_start:source_end],
+                    target_code[batch_index, :, target_start:target_end],
+                )
+            )
+            confidence = float(segment.get("confidence", 1.0))
+            for source_local, target_local in path:
+                source_position = source_start + source_local
+                target_position = target_start + target_local
+                source_id = int(source_ids_cpu[batch_index, source_position])
+                target_id = int(target_ids_cpu[batch_index, target_position])
+                if source_id == target_id:
+                    continue
+                logits = code_logits[batch_index, source_position]
+                total = total + confidence * F.relu(
+                    logits[source_id] - logits[target_id] + margin
+                )
+                weight_total += confidence
+                positions += 1
+    if positions == 0:
+        # A batch with no true substitutions should be a safe no-op rather
+        # than an error or pressure to alter already-correct codes.
+        return code_logits.sum() * 0.0, 0
+    return total / weight_total, positions
 
 
 def hard_dtw_path(cost: torch.Tensor) -> list[tuple[int, int]]:

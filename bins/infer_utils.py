@@ -1,7 +1,7 @@
 import hashlib
 import os
 import time
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -102,34 +102,83 @@ def run_offline(model, source_wav: torch.Tensor, target_wav: torch.Tensor, targe
 
 
 @torch.inference_mode()
-def run_stream_chunk_forward(
-    model,
-    source_wav: torch.Tensor,
-    speaker_condition: torch.Tensor,
-    frame_condition: torch.Tensor,
-):
+def extract_source_streams(model, source_wav: torch.Tensor) -> Dict[str, torch.Tensor]:
+    """Encode one source window into X-VC's two synchronized 50 Hz streams."""
     semantic_encoder = _required(model.semantic_encoder, "semantic_encoder")
     semantic_adapter = _required(model.semantic_adapter, "semantic_adapter")
     acoustic_encoder = _required(model.acoustic_encoder, "acoustic_encoder")
+    acoustic_quantizer = _required(model.acoustic_quantizer, "acoustic_quantizer")
+
+    feat = semantic_encoder.extract_and_encode(source_wav.squeeze(1))["speech_tokens"]
+    semantic = semantic_encoder.embed_ids(feat)
+    semantic = semantic_adapter(semantic.transpose(1, 2)).transpose(1, 2)
+
+    acoustic_latent = acoustic_encoder(source_wav)
+    quantized = acoustic_quantizer(acoustic_latent)
+    acoustic_zq, acoustic_indices = quantized[0], quantized[1]
+
+    # Encoder edge behaviour can differ by one frame. Only a shared timeline is
+    # valid for concatenation or persona editing.
+    frames = min(semantic.shape[1], acoustic_zq.shape[-1], acoustic_indices.shape[-1])
+    return {
+        "semantic": semantic[:, :frames],
+        "acoustic_zq": acoustic_zq[:, :, :frames],
+        "acoustic_indices": acoustic_indices[:, :frames],
+    }
+
+
+@torch.inference_mode()
+def render_source_streams(
+    model,
+    streams: Dict[str, torch.Tensor],
+    speaker_condition: torch.Tensor,
+    frame_condition: torch.Tensor,
+    stream_editor: Optional[Any] = None,
+    stream_window: Optional[Dict[str, int]] = None,
+):
     acoustic_quantizer = _required(model.acoustic_quantizer, "acoustic_quantizer")
     prenet = _required(model.prenet, "prenet")
     acoustic_converter = _required(model.acoustic_converter, "acoustic_converter")
     acoustic_decoder = _required(model.acoustic_decoder, "acoustic_decoder")
 
-    feat = semantic_encoder.extract_and_encode(source_wav.squeeze(1))["speech_tokens"]
-    sem_emb = semantic_encoder.embed_ids(feat)
-    sem_emb = semantic_adapter(sem_emb.transpose(1, 2)).transpose(1, 2)
-
-    z = acoustic_encoder(source_wav)
-    aq_outputs = acoustic_quantizer(z)
-    zq = aq_outputs[0]
+    sem_emb = streams["semantic"]
+    zq = streams["acoustic_zq"]
+    indices = streams["acoustic_indices"]
+    if stream_editor is not None:
+        if stream_window is not None:
+            stream_editor.validate_stream_window(**stream_window)
+        sem_emb, zq = stream_editor.edit_pre_prenet(
+            sem_emb, zq, indices, acoustic_quantizer
+        )
     acu_emb = zq.transpose(1, 2)
 
     combined_emb = torch.cat([sem_emb, acu_emb], dim=2)
     x = prenet(combined_emb.transpose(1, 2), speaker_condition)
+    if stream_editor is not None:
+        x = stream_editor.edit_post_prenet(x)
     x = acoustic_converter(x, frame_condition, speaker_condition)
     y = acoustic_decoder(x)
     return y
+
+
+@torch.inference_mode()
+def run_stream_chunk_forward(
+    model,
+    source_wav: torch.Tensor,
+    speaker_condition: torch.Tensor,
+    frame_condition: torch.Tensor,
+    stream_editor: Optional[Any] = None,
+    stream_window: Optional[Dict[str, int]] = None,
+):
+    streams = extract_source_streams(model, source_wav)
+    return render_source_streams(
+        model,
+        streams,
+        speaker_condition,
+        frame_condition,
+        stream_editor=stream_editor,
+        stream_window=stream_window,
+    )
 
 
 @torch.inference_mode()
@@ -143,6 +192,7 @@ def run_streaming(
     current_ms: int,
     future_ms: int,
     smooth_ms: int,
+    stream_editor: Optional[Any] = None,
 ):
     if current_ms <= 0:
         raise ValueError("`current_ms` must be > 0 for streaming mode.")
@@ -151,6 +201,13 @@ def run_streaming(
     history_ms = chunk_ms - current_ms - smooth_ms - future_ms
     if history_ms < 0:
         raise ValueError("Invalid streaming window: chunk_ms - current_ms - smooth_ms - future_ms must be >= 0.")
+    stream_window = {
+        "history_ms": history_ms,
+        "smooth_ms": smooth_ms,
+        "future_ms": future_ms,
+    }
+    if stream_editor is not None:
+        stream_editor.validate_stream_window(**stream_window)
 
     overlap_len = smooth_ms * sample_rate // 1000
     if overlap_len > 0:
@@ -167,7 +224,9 @@ def run_streaming(
     latency_ms_list: List[float] = []
 
     for i in range(total_n_chunks):
-        t0 = time.time()
+        if source_wav.is_cuda:
+            torch.cuda.synchronize(source_wav.device)
+        t0 = time.perf_counter()
 
         start_len = (i * current_ms - history_ms) * sample_rate // 1000
         end_len = (i * current_ms + current_ms + smooth_ms + future_ms) * sample_rate // 1000
@@ -177,7 +236,14 @@ def run_streaming(
         chunk_wav = source_wav[:, :, start_len + left_pad : end_len - right_pad]
         chunk_wav = F.pad(chunk_wav, (left_pad, right_pad), mode="constant", value=0)
 
-        chunk_out = run_stream_chunk_forward(model, chunk_wav, speaker_condition, frame_condition)
+        chunk_out = run_stream_chunk_forward(
+            model,
+            chunk_wav,
+            speaker_condition,
+            frame_condition,
+            stream_editor=stream_editor,
+            stream_window=stream_window,
+        )
         cur_start = history_ms * sample_rate // 1000
         cur_end = (history_ms + current_ms) * sample_rate // 1000
         chunk_recon_wav = chunk_out[:, :, cur_start:cur_end]
@@ -191,7 +257,9 @@ def run_streaming(
             tail_buffer = chunk_out[:, :, tail_start : tail_start + overlap_len]
 
         recon_wav_list.append(chunk_recon_wav)
-        latency_ms_list.append((time.time() - t0) * 1000.0)
+        if source_wav.is_cuda:
+            torch.cuda.synchronize(source_wav.device)
+        latency_ms_list.append((time.perf_counter() - t0) * 1000.0)
 
     recon_wav = torch.cat(recon_wav_list, dim=-1)
     recon_wav = recon_wav[:, :, :source_len]

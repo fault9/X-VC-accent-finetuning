@@ -2,12 +2,15 @@ import unittest
 
 import torch
 
-from models.joint_accent_mapper import JointAccentMapper
+from models.joint_accent_mapper import JointAccentMapper, PostPrenetAccentMapper
+from scripts.train_joint_persona_mapper import context_valid_items
+from xvc.runtime.persona_editor import PersonaStreamEditor
 from xvc.training.monotonic import (
     cosine_cost,
     phonewise_aligned_code_agreement,
     phonewise_discrete_code_loss,
     phonewise_dual_stream_loss,
+    phonewise_target_code_margin_loss,
     soft_dtw,
 )
 
@@ -39,6 +42,139 @@ class JointAccentMapperTest(unittest.TestCase):
             layers=1,
         )
         self.assertFalse(any("speaker" in name for name, _ in mapper.named_parameters()))
+
+    def test_stream_window_rejects_hidden_latency_and_excess_history(self):
+        safe = JointAccentMapper(
+            semantic_dim=8, acoustic_dim=8, code_dim=2, hidden=16,
+            layers=5, lookahead_frames=4,
+        )
+        safe.validate_stream_window(history_ms=2160, smooth_ms=20, future_ms=100)
+        with self.assertRaises(ValueError):
+            safe.validate_stream_window(history_ms=2160, smooth_ms=0, future_ms=40)
+        too_deep = JointAccentMapper(
+            semantic_dim=8, acoustic_dim=8, code_dim=2, hidden=16,
+            layers=6, lookahead_frames=0,
+        )
+        with self.assertRaises(ValueError):
+            too_deep.validate_stream_window(history_ms=2160, smooth_ms=20, future_ms=100)
+
+    def test_post_prenet_mapper_starts_as_exact_identity(self):
+        mapper = PostPrenetAccentMapper(
+            input_dim=12, hidden=16, layers=2, lookahead_frames=1,
+            input_dropout=0.0,
+        ).eval()
+        hidden = torch.randn(2, 12, 9)
+        torch.testing.assert_close(mapper(hidden), hidden)
+
+    def test_context_filter_uses_all_causally_valid_window_frames(self):
+        item = {
+            "source_semantic": torch.randn(4, 20),
+            "source_zq": torch.randn(4, 20),
+            "source_codes": torch.arange(20),
+            "target_semantic": torch.randn(4, 20),
+            "target_zq": torch.randn(4, 20),
+            "target_codes": torch.arange(20),
+            "phone_segments": [
+                {"src": [6, 12], "tgt": [2, 8], "confidence": 1.0},
+                {"src": [15, 20], "tgt": [10, 15], "confidence": 1.0},
+            ],
+            "meta": {
+                "window_id": "example__w00",
+                "source_encoded_from_window": True,
+                "target_encoded_from_window": True,
+            },
+        }
+        prepared = context_valid_items(
+            [item], history_frames=8, lookahead_frames=2,
+            expected_window_frames=20, min_phone_segments=2,
+        )[0]
+        self.assertEqual(prepared["source_semantic"].shape[-1], 20)
+        self.assertEqual(
+            [segment["src"] for segment in prepared["phone_segments"]],
+            [[8, 12], [15, 18]],
+        )
+        self.assertEqual(
+            [segment["tgt"] for segment in prepared["phone_segments"]],
+            [[4, 8], [10, 13]],
+        )
+        self.assertEqual(int(prepared["source_valid_mask"].sum()), 10)
+        self.assertEqual(int(prepared["target_valid_mask"].sum()), 10)
+
+    def test_context_filter_rejects_old_full_utterance_feature_cache(self):
+        item = {
+            "source_semantic": torch.randn(4, 20),
+            "source_zq": torch.randn(4, 20),
+            "source_codes": torch.arange(20),
+            "target_semantic": torch.randn(4, 20),
+            "target_zq": torch.randn(4, 20),
+            "target_codes": torch.arange(20),
+            "phone_segments": [{"src": [8, 12], "tgt": [8, 12]}],
+            "meta": {},
+        }
+        with self.assertRaisesRegex(ValueError, "predates raw 2.4 s"):
+            context_valid_items(
+                [item], history_frames=8, lookahead_frames=2,
+                expected_window_frames=20,
+            )
+
+    def test_runtime_editor_uses_channel_first_native_quantizer_geometry(self):
+        class FakeQuantizer:
+            def __init__(self):
+                self.weight = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+
+            def embed_code(self, indices):
+                return self.weight[indices]
+
+            def decode_latents(self, latents):
+                self.seen_shape = tuple(latents.shape)
+                indices = latents.argmax(dim=1)
+                return latents, indices, torch.zeros(1)
+
+            def vq2emb(self, indices, out_proj=True):
+                return self.weight[indices].transpose(1, 2).repeat(1, 5, 1)
+
+        mapper = JointAccentMapper(
+            semantic_dim=12, acoustic_dim=10, code_dim=2, hidden=16,
+            layers=1, lookahead_frames=0, input_dropout=0.0,
+        ).eval()
+        quantizer = FakeQuantizer()
+        editor = PersonaStreamEditor(mapper, "pre_prenet", {})
+        indices = torch.tensor([[0, 1, 0]])
+        zq = quantizer.vq2emb(indices)
+        semantic = torch.randn(1, 3, 12)
+        edited_semantic, edited_zq = editor.edit_pre_prenet(
+            semantic, zq, indices, quantizer
+        )
+        self.assertEqual(quantizer.seen_shape, (1, 2, 3))
+        torch.testing.assert_close(edited_semantic, semantic)
+        torch.testing.assert_close(edited_zq, zq)
+
+    def test_chunk_output_matches_full_context_inside_declared_receptive_field(self):
+        torch.manual_seed(7)
+        mapper = JointAccentMapper(
+            semantic_dim=8, acoustic_dim=8, code_dim=2, hidden=16,
+            layers=2, kernel_size=3, lookahead_frames=2, input_dropout=0.0,
+        ).eval()
+        torch.nn.init.normal_(mapper.semantic_delta.weight, std=0.02)
+        torch.nn.init.normal_(mapper.code_delta.weight, std=0.02)
+        semantic = torch.randn(1, 8, 200)
+        acoustic = torch.randn(1, 8, 200)
+        code = torch.randn(1, 2, 200)
+        full_sem, full_code = mapper(semantic, acoustic, code)
+        start, end = 50, 170
+        chunk_sem, chunk_code = mapper(
+            semantic[:, :, start:end],
+            acoustic[:, :, start:end],
+            code[:, :, start:end],
+        )
+        left = mapper.receptive_history_frames
+        right = mapper.lookahead_frames
+        torch.testing.assert_close(
+            chunk_sem[:, :, left:-right], full_sem[:, :, start + left:end - right]
+        )
+        torch.testing.assert_close(
+            chunk_code[:, :, left:-right], full_code[:, :, start + left:end - right]
+        )
 
     def test_nearest_code_uses_frozen_codebook_geometry(self):
         codebook = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
@@ -125,6 +261,26 @@ class MonotonicLossTest(unittest.TestCase):
         )
         self.assertEqual(arbitrary["predicted"], 0.0)
         self.assertEqual(arbitrary["gain"], 0.0)
+
+    def test_target_margin_prefers_aligned_target_over_native_code(self):
+        source_indices = torch.tensor([[0, 0]])
+        target_indices = torch.tensor([[1, 1]])
+        codebook = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        source_code = codebook[source_indices].transpose(1, 2)
+        target_code = codebook[target_indices].transpose(1, 2)
+        segments = [[{"src": [0, 2], "tgt": [0, 2], "confidence": 1.0}]]
+        good = torch.tensor([[[0.0, 3.0], [0.0, 3.0]]], requires_grad=True)
+        bad = torch.tensor([[[3.0, 0.0], [3.0, 0.0]]], requires_grad=True)
+        good_loss, positions = phonewise_target_code_margin_loss(
+            good, source_indices, target_indices, source_code, target_code, segments
+        )
+        bad_loss, _ = phonewise_target_code_margin_loss(
+            bad, source_indices, target_indices, source_code, target_code, segments
+        )
+        self.assertEqual(positions, 2)
+        self.assertLess(float(good_loss), float(bad_loss))
+        bad_loss.backward()
+        self.assertTrue(torch.isfinite(bad.grad).all())
 
 
 if __name__ == "__main__":

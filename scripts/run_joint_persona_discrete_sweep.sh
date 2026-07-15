@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Controlled 3x3 sweep for the inference-matched ASI acoustic-code objective.
+# Controlled latency-safe sweep for the inference-matched ASI code objective.
 # X-VC remains frozen; every arm uses the same extracted pairs, ASI reference,
 # unseen-source set, scoring stack, and acceptance gate.
 set -euo pipefail
@@ -21,15 +21,17 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 DATASET_ROOT="${DATASET_ROOT:-data/hindi_asi_pristine_parallel_221}"
-PAIRS_ROOT="${PAIRS_ROOT:-data/joint_persona_pairs_asi}"
+PAIRS_ROOT="${PAIRS_ROOT:-data/joint_persona_windows_asi_2400ms}"
 REFERENCE="${REFERENCE:-data/eval_targets/ASI.wav}"
 SOURCE_DIR="${SOURCE_DIR:-data/eval_sources_joint_persona_clean}"
 CONFIG="${CONFIG:-configs/xvc.yaml}"
 CHECKPOINT="${CHECKPOINT:-ckpts/xvc.pt}"
 EXP_ROOT="${EXP_ROOT:-exp/joint_persona_discrete_asi}"
-LOOKAHEADS="${LOOKAHEADS:-0 4 8}"
-DISCRETE_WEIGHTS="${DISCRETE_WEIGHTS:-0.25 0.5 1.0}"
+LOOKAHEADS="${LOOKAHEADS:-0 4}"
+DISCRETE_WEIGHTS="${DISCRETE_WEIGHTS:-0.25 0.5}"
 CODE_TEMPERATURE="${CODE_TEMPERATURE:-0.1}"
+CODE_MARGIN_WEIGHT="${CODE_MARGIN_WEIGHT:-0.25}"
+CODE_MARGIN="${CODE_MARGIN:-1.0}"
 STEPS="${STEPS:-3000}"
 BATCH="${BATCH:-4}"
 LR="${LR:-0.0002}"
@@ -74,7 +76,7 @@ if (( free_gpu_mib < MIN_FREE_GPU_MIB )); then
 fi
 
 mkdir -p "$EXP_ROOT" exp/run_logs
-echo -e "lookahead_frames\tdiscrete_weight\tstatus\tgate\tcode_change\ttarget_code_gain" > "$EXP_ROOT/status.tsv"
+echo -e "lookahead_frames\tdiscrete_weight\tstatus\taudio_gate\tlatency_gate\tcode_change\ttarget_code_gain" > "$EXP_ROOT/status.tsv"
 echo "=== DISCRETE JOINT TARGET-PERSONA SWEEP $(date) ==="
 echo "target persona    : ASI voice + Hindi/Indian English accent"
 echo "source policy     : no source-speaker conditioning; eval speakers unseen"
@@ -82,6 +84,7 @@ echo "voice policy      : frozen X-VC + identical ASI reference"
 echo "lookaheads        : $LOOKAHEADS"
 echo "discrete weights  : $DISCRETE_WEIGHTS"
 echo "code temperature  : $CODE_TEMPERATURE"
+echo "target code margin: weight=$CODE_MARGIN_WEIGHT margin=$CODE_MARGIN"
 
 if [[ ! -f "$PAIRS_ROOT/extraction_summary.json" ]]; then
   python scripts/extract_joint_persona_pairs.py \
@@ -100,6 +103,11 @@ from pathlib import Path
 summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 if summary.get("status") != "pass":
     raise SystemExit(f"[error] extracted pair gate is not pass: {summary.get('status')}")
+policy = summary.get("window_policy", {})
+if summary.get("schema_version", 0) < 2 or not policy.get("waveform_crop_before_frozen_encoder"):
+    raise SystemExit("[error] extracted pairs are not raw-window-encoded schema v2")
+if float(policy.get("window_seconds", 0)) != 2.4 or int(policy.get("window_frames", 0)) != 120:
+    raise SystemExit(f"[error] expected 2.4 s / 120-frame encoded windows, got {policy}")
 for split in ("train", "val"):
     if not (Path(sys.argv[1]).parent / split).is_dir():
         raise SystemExit(f"[error] missing extracted split: {split}")
@@ -127,7 +135,10 @@ for lookahead in $LOOKAHEADS; do
       --batch "$BATCH" \
       --lr "$LR" \
       --lookahead-frames "$lookahead" \
+      --layers 5 \
       --lambda-discrete-code "$discrete_weight" \
+      --lambda-code-margin "$CODE_MARGIN_WEIGHT" \
+      --code-margin "$CODE_MARGIN" \
       --code-temperature "$CODE_TEMPERATURE" \
       --device "cuda:$DEVICE" \
       2>&1 | tee "$arm.train.log"
@@ -153,6 +164,8 @@ PY
       --require-unseen-source \
       --min-unseen-speakers "$MIN_UNSEEN_SPEAKERS" \
       --training-manifest "$DATASET_ROOT/manifests/train.jsonl" \
+      --streaming \
+      --chunk-ms 2400 --current-ms 120 --smooth-ms 20 --future-ms 100 \
       --device "$DEVICE" \
       2>&1 | tee "$arm.eval.log"
 
@@ -169,11 +182,21 @@ PY
     if python scripts/gate_joint_persona_mapper.py \
         --summary "$arm/eval_metrics/condition_summary.csv" \
         --out "$arm/gate.json"; then
-      echo -e "${lookahead}\t${discrete_weight}\tcomplete\tpass\t${code_change}\t${target_gain}" >> "$EXP_ROOT/status.tsv"
-      passed=$((passed + 1))
+      audio_gate=pass
     else
-      echo -e "${lookahead}\t${discrete_weight}\tcomplete\tfail\t${code_change}\t${target_gain}" >> "$EXP_ROOT/status.tsv"
+      audio_gate=fail
     fi
+    if python scripts/gate_persona_latency.py \
+        --meta "$arm/eval_compare/audit_meta.json" \
+        --out "$arm/latency_gate.json"; then
+      latency_gate=pass
+    else
+      latency_gate=fail
+    fi
+    if [[ "$audio_gate" == pass && "$latency_gate" == pass ]]; then
+      passed=$((passed + 1))
+    fi
+    echo -e "${lookahead}\t${discrete_weight}\tcomplete\t${audio_gate}\t${latency_gate}\t${code_change}\t${target_gain}" >> "$EXP_ROOT/status.tsv"
   done
 done
 

@@ -43,6 +43,11 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--chunk-ms", type=int, default=2400)
+    parser.add_argument("--current-ms", type=int, default=120)
+    parser.add_argument("--smooth-ms", type=int, default=20)
+    parser.add_argument("--future-ms", type=int, default=100)
     args = parser.parse_args(argv)
 
     import numpy as np
@@ -53,9 +58,11 @@ def main(argv=None) -> int:
         load_pair_as_tensors,
         load_xvc,
         precompute_conditions,
+        run_stream_chunk_forward,
+        run_streaming,
         to_numpy_audio,
     )
-    from models.joint_accent_mapper import JointAccentMapper
+    from xvc.runtime import load_persona_stream_editor
 
     source_paths = sorted(Path(args.source_dir).glob("*.wav"))
     if args.max_sources:
@@ -63,8 +70,8 @@ def main(argv=None) -> int:
     if not source_paths:
         raise SystemExit(f"[error] no wavs under {args.source_dir}")
     mapper_payload = torch.load(args.mapper_ckpt, map_location="cpu")
-    if mapper_payload.get("model") != "JointAccentMapper":
-        raise SystemExit("[error] checkpoint is not a JointAccentMapper")
+    if mapper_payload.get("model") not in {"JointAccentMapper", "PostPrenetAccentMapper"}:
+        raise SystemExit("[error] checkpoint is not a supported persona stream editor")
     seen = {str(value).casefold() for value in mapper_payload.get("source_speakers_seen", [])}
     eval_speakers = {speaker_from_name(path) for path in source_paths}
     overlap = seen & eval_speakers
@@ -104,9 +111,14 @@ def main(argv=None) -> int:
         (output / condition / "manifests").mkdir(parents=True, exist_ok=True)
 
     cfg, model, device = load_xvc(args.config, args.ckpt, args.device, False)
-    mapper = JointAccentMapper(**mapper_payload["config"])
-    mapper.load_state_dict(mapper_payload["state_dict"])
-    mapper.to(device).eval()
+    editor = load_persona_stream_editor(
+        args.mapper_ckpt,
+        model,
+        device,
+        expected_target_persona=mapper_payload.get("target_persona"),
+    )
+    history_ms = args.chunk_ms - args.current_ms - args.smooth_ms - args.future_ms
+    editor.validate_stream_window(history_ms, args.smooth_ms, args.future_ms)
     codebook = model.acoustic_quantizer.codebook.weight.detach().to(device)
     codebook_sha256 = hashlib.sha256(
         codebook.detach().float().cpu().numpy().tobytes()
@@ -128,6 +140,7 @@ def main(argv=None) -> int:
         model, reference_wav, reference_cond
     )
     manifests = {condition: [] for condition in CONDITIONS}
+    latency_ms = {condition: [] for condition in CONDITIONS}
 
     @torch.inference_mode()
     def render(path: Path):
@@ -139,39 +152,49 @@ def main(argv=None) -> int:
             int(cfg["latent_hop_length"]),
             True,
         )
-        tokens = model.semantic_encoder.extract_and_encode(
-            source_wav.squeeze(1)
-        )["speech_tokens"]
-        semantic = model.semantic_adapter(
-            model.semantic_encoder.embed_ids(tokens).transpose(1, 2)
-        )
-        acoustic_outputs = model.acoustic_quantizer(
-            model.acoustic_encoder(source_wav)
-        )
-        source_zq, source_codes = acoustic_outputs[0], acoustic_outputs[1]
-        frames = min(semantic.shape[-1], source_zq.shape[-1], source_codes.shape[-1])
-        semantic = semantic[:, :, :frames]
-        source_zq = source_zq[:, :, :frames]
-        source_codes = source_codes[:, :frames]
-        source_code = model.acoustic_quantizer.embed_code(source_codes).transpose(1, 2)
-        edited_semantic, edited_code = mapper(semantic, source_zq, source_code)
-        edited_indices = mapper.nearest_codes(edited_code, codebook)
-        edited_zq = model.acoustic_quantizer.vq2emb(edited_indices, out_proj=True)
-
-        def decode(sem, zq):
-            combined = torch.cat([sem.transpose(1, 2), zq.transpose(1, 2)], dim=2)
-            hidden = model.prenet(combined.transpose(1, 2), speaker_condition)
-            hidden = model.acoustic_converter(
-                hidden, frame_condition, speaker_condition
+        if args.streaming:
+            kwargs = {
+                "sample_rate": int(cfg["sample_rate"]),
+                "chunk_ms": args.chunk_ms,
+                "current_ms": args.current_ms,
+                "smooth_ms": args.smooth_ms,
+                "future_ms": args.future_ms,
+            }
+            stock, stock_latency = run_streaming(
+                model, source_wav, speaker_condition, frame_condition,
+                stream_editor=None, **kwargs,
             )
-            return np.asarray(
-                to_numpy_audio(model.acoustic_decoder(hidden)), dtype=np.float32
+            edited, edited_latency = run_streaming(
+                model, source_wav, speaker_condition, frame_condition,
+                stream_editor=editor, **kwargs,
             )
-
-        return decode(semantic, source_zq), decode(edited_semantic, edited_zq), int(cfg["sample_rate"])
+        else:
+            stock_latency = []
+            edited_latency = []
+            stock = run_stream_chunk_forward(
+                model, source_wav, speaker_condition, frame_condition
+            )
+            edited = run_stream_chunk_forward(
+                model, source_wav, speaker_condition, frame_condition,
+                stream_editor=editor,
+                stream_window={
+                    "history_ms": history_ms,
+                    "smooth_ms": args.smooth_ms,
+                    "future_ms": args.future_ms,
+                },
+            )
+        return (
+            np.asarray(to_numpy_audio(stock), dtype=np.float32),
+            np.asarray(to_numpy_audio(edited), dtype=np.float32),
+            int(cfg["sample_rate"]),
+            stock_latency,
+            edited_latency,
+        )
 
     for index, source_path in enumerate(source_paths, start=1):
-        stock, edited, sample_rate = render(source_path)
+        stock, edited, sample_rate, stock_latency, edited_latency = render(source_path)
+        latency_ms["stock_xvc"].extend(stock_latency)
+        latency_ms["joint_persona_mapper"].extend(edited_latency)
         filename = f"{source_path.stem}__persona.wav"
         for condition, audio in (
             ("stock_xvc", stock),
@@ -212,12 +235,36 @@ def main(argv=None) -> int:
         "target_persona": mapper_payload.get("target_persona"),
         "reference": args.reference,
         "mapper_checkpoint": args.mapper_ckpt,
+        "mapper_model": mapper_payload.get("model"),
+        "streaming": args.streaming,
+        "stream_window_ms": {
+            "chunk": args.chunk_ms,
+            "history": history_ms,
+            "current": args.current_ms,
+            "smooth": args.smooth_ms,
+            "future": args.future_ms,
+        },
         "xvc_config": args.config,
         "xvc_checkpoint": args.ckpt,
         "quantizer_codebook_sha256": codebook_sha256,
         "voice_policy": "identical X-VC target reference and frozen voice stack in both conditions",
         "n": len(source_paths),
+        "latency_ms": {
+            condition: {
+                "n": len(values),
+                "mean": round(float(np.mean(values)), 4) if values else None,
+                "p50": round(float(np.percentile(values, 50)), 4) if values else None,
+                "p95": round(float(np.percentile(values, 95)), 4) if values else None,
+            }
+            for condition, values in latency_ms.items()
+        },
     }
+    if args.streaming:
+        meta["latency_ms"]["p95_mapper_overhead"] = round(
+            meta["latency_ms"]["joint_persona_mapper"]["p95"]
+            - meta["latency_ms"]["stock_xvc"]["p95"],
+            4,
+        )
     (output / "audit_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"[render] {len(source_paths)} unseen-source clips x 2 conditions -> {output}")
     return 0
