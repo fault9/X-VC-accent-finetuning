@@ -86,10 +86,12 @@ def collate(items, codebook, device):
         "source_sem": source_sem.to(device),
         "source_zq": source_zq.to(device),
         "source_code": F.embedding(source_codes, codebook).transpose(1, 2),
+        "source_codes": source_codes,
         "source_mask": source_mask.to(device),
         "target_sem": target_sem.to(device),
         "target_zq": target_zq.to(device),
         "target_code": F.embedding(target_codes, codebook).transpose(1, 2),
+        "target_codes": target_codes,
         "target_mask": target_mask.to(device),
         "segments": segments,
     }
@@ -99,11 +101,15 @@ def masked_mean(value, mask):
     return (value * mask).sum() / (mask.sum() * value.shape[1] + 1e-8)
 
 
-def evaluate(mapper, items, codebook, device, gamma):
+def evaluate(mapper, items, codebook, device, gamma, code_temperature):
     import torch
     import torch.nn.functional as F
 
-    from xvc.training.monotonic import phonewise_dual_stream_loss
+    from xvc.training.monotonic import (
+        phonewise_aligned_code_agreement,
+        phonewise_discrete_code_loss,
+        phonewise_dual_stream_loss,
+    )
 
     rows = []
     mapper.eval()
@@ -124,6 +130,17 @@ def evaluate(mapper, items, codebook, device, gamma):
                 batch["segments"],
                 gamma=gamma,
             )
+            code_logits = mapper.code_logits(
+                predicted_code, codebook, temperature=code_temperature
+            )
+            discrete_code_loss, discrete_phones = phonewise_discrete_code_loss(
+                code_logits,
+                batch["target_codes"],
+                batch["segments"],
+                gamma=gamma,
+            )
+            if discrete_phones != phones:
+                raise RuntimeError("continuous and discrete phone counts differ")
             identity_sem, identity_code = mapper(
                 batch["target_sem"], batch["target_zq"], batch["target_code"]
             )
@@ -137,14 +154,23 @@ def evaluate(mapper, items, codebook, device, gamma):
                 batch["target_mask"],
             )
             nearest = mapper.nearest_codes(predicted_code, codebook)
-            source_nearest = mapper.nearest_codes(batch["source_code"], codebook)
-            changed = ((nearest != source_nearest).float() * batch["source_mask"][:, 0]).sum()
+            source_indices = batch["source_codes"]
+            changed = ((nearest != source_indices).float() * batch["source_mask"][:, 0]).sum()
             valid = batch["source_mask"].sum()
+            agreement = phonewise_aligned_code_agreement(
+                nearest,
+                source_indices,
+                batch["target_codes"],
+                batch["source_code"],
+                batch["target_code"],
+                batch["segments"],
+            )
             rows.append(
                 {
                     "speaker": item["meta"]["source_speaker"],
                     "semantic": float(sem_loss),
                     "acoustic": float(code_loss),
+                    "discrete_code": float(discrete_code_loss),
                     "identity": float(identity),
                     "semantic_delta": float(
                         masked_mean(sem_delta.pow(2), batch["source_mask"]).sqrt()
@@ -153,6 +179,9 @@ def evaluate(mapper, items, codebook, device, gamma):
                         masked_mean(code_delta.pow(2), batch["source_mask"]).sqrt()
                     ),
                     "code_change_fraction": float(changed / valid.clamp_min(1)),
+                    "aligned_source_code_agreement": agreement["source"],
+                    "aligned_predicted_code_agreement": agreement["predicted"],
+                    "aligned_target_code_gain": agreement["gain"],
                     "phones": phones,
                 }
             )
@@ -167,10 +196,14 @@ def evaluate(mapper, items, codebook, device, gamma):
             for key in (
                 "semantic",
                 "acoustic",
+                "discrete_code",
                 "identity",
                 "semantic_delta",
                 "code_delta",
                 "code_change_fraction",
+                "aligned_source_code_agreement",
+                "aligned_predicted_code_agreement",
+                "aligned_target_code_gain",
             )
         }
         summary[name]["n"] = len(group)
@@ -194,6 +227,18 @@ def main(argv=None) -> int:
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--lambda-semantic", type=float, default=1.0)
     parser.add_argument("--lambda-acoustic", type=float, default=1.0)
+    parser.add_argument(
+        "--lambda-discrete-code",
+        type=float,
+        default=0.0,
+        help="weight for phone-local ASI code-id NLL; zero preserves the original objective",
+    )
+    parser.add_argument(
+        "--code-temperature",
+        type=float,
+        default=0.1,
+        help="temperature for frozen-codebook cosine logits",
+    )
     parser.add_argument("--lambda-identity", type=float, default=0.5)
     parser.add_argument("--lambda-smooth", type=float, default=0.05)
     parser.add_argument("--lambda-delta", type=float, default=0.01)
@@ -210,10 +255,17 @@ def main(argv=None) -> int:
 
     from bins.infer_utils import load_xvc
     from models.joint_accent_mapper import JointAccentMapper
-    from xvc.training.monotonic import phonewise_dual_stream_loss
+    from xvc.training.monotonic import (
+        phonewise_discrete_code_loss,
+        phonewise_dual_stream_loss,
+    )
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
+    if args.lambda_discrete_code < 0:
+        raise SystemExit("[error] --lambda-discrete-code must be non-negative")
+    if args.code_temperature <= 0:
+        raise SystemExit("[error] --code-temperature must be positive")
     rng = random.Random(args.seed)
     device = torch.device(args.device)
     train_items = load_items(Path(args.train_dir))
@@ -253,9 +305,17 @@ def main(argv=None) -> int:
     history = []
     train_rows = []
     best_score = float("inf")
-    print(f"[mapper] {mapper.extra_repr()}")
-    print(f"[data] train={len(train_items)} val={len(val_items)} speakers={source_speakers}")
-    print("[voice] X-VC frozen; target voice remains reference-conditioned")
+    print(f"[mapper] {mapper.extra_repr()}", flush=True)
+    print(
+        f"[data] train={len(train_items)} val={len(val_items)} speakers={source_speakers}",
+        flush=True,
+    )
+    print("[voice] X-VC frozen; target voice remains reference-conditioned", flush=True)
+    print(
+        f"[objective] continuous_acoustic=1.0 discrete_code={args.lambda_discrete_code} "
+        f"temperature={args.code_temperature}",
+        flush=True,
+    )
 
     for step in range(1, args.steps + 1):
         batch = collate(next(batch_iterator), codebook, device)
@@ -278,6 +338,20 @@ def main(argv=None) -> int:
             batch["segments"],
             gamma=args.gamma,
         )
+        if args.lambda_discrete_code:
+            code_logits = mapper.code_logits(
+                predicted_code, codebook, temperature=args.code_temperature
+            )
+            discrete_code_loss, discrete_phones = phonewise_discrete_code_loss(
+                code_logits,
+                batch["target_codes"],
+                batch["segments"],
+                gamma=args.gamma,
+            )
+            if discrete_phones != phones:
+                raise RuntimeError("continuous and discrete phone counts differ")
+        else:
+            discrete_code_loss = predicted_code.new_zeros(())
         identity_sem, identity_code = mapper(
             batch["target_sem"], batch["target_zq"], batch["target_code"]
         )
@@ -303,6 +377,7 @@ def main(argv=None) -> int:
         loss = (
             args.lambda_semantic * semantic_loss
             + args.lambda_acoustic * acoustic_loss
+            + args.lambda_discrete_code * discrete_code_loss
             + args.lambda_identity * identity_loss
             + args.lambda_smooth * smooth_loss
             + args.lambda_delta * delta_loss
@@ -316,6 +391,7 @@ def main(argv=None) -> int:
             "loss": float(loss.detach()),
             "semantic": float(semantic_loss.detach()),
             "acoustic": float(acoustic_loss.detach()),
+            "discrete_code": float(discrete_code_loss.detach()),
             "identity": float(identity_loss.detach()),
             "smooth": float(smooth_loss.detach()),
             "delta": float(delta_loss.detach()),
@@ -330,19 +406,31 @@ def main(argv=None) -> int:
             print(
                 f"step={step:04d} loss={train_row['loss']:.4f} "
                 f"sem={train_row['semantic']:.4f} acu={train_row['acoustic']:.4f} "
-                f"id={train_row['identity']:.4f} phones={phones}"
+                f"disc={train_row['discrete_code']:.4f} "
+                f"id={train_row['identity']:.4f} phones={phones}",
+                flush=True,
             )
         if step % args.val_every == 0 or step == args.steps:
-            summary = evaluate(mapper, val_items, codebook, device, args.gamma)
+            summary = evaluate(
+                mapper,
+                val_items,
+                codebook,
+                device,
+                args.gamma,
+                args.code_temperature,
+            )
             all_metrics = summary["all"]
             worst_speaker = max(
-                metrics["semantic"] + metrics["acoustic"]
+                metrics["semantic"]
+                + metrics["acoustic"]
+                + args.lambda_discrete_code * metrics["discrete_code"]
                 for name, metrics in summary.items()
                 if name != "all"
             )
             score = (
                 all_metrics["semantic"]
                 + all_metrics["acoustic"]
+                + args.lambda_discrete_code * all_metrics["discrete_code"]
                 + 0.5 * all_metrics["identity"]
                 + 0.25 * worst_speaker
             )
@@ -372,8 +460,11 @@ def main(argv=None) -> int:
                 torch.save(payload, output / "best.pt")
             print(
                 f"[val] step={step} score={score:.4f} sem={all_metrics['semantic']:.4f} "
-                f"acu={all_metrics['acoustic']:.4f} id={all_metrics['identity']:.4f} "
-                f"code_change={all_metrics['code_change_fraction']:.3f}"
+                f"acu={all_metrics['acoustic']:.4f} disc={all_metrics['discrete_code']:.4f} "
+                f"id={all_metrics['identity']:.4f} "
+                f"code_change={all_metrics['code_change_fraction']:.3f} "
+                f"target_gain={all_metrics['aligned_target_code_gain']:.4f}",
+                flush=True,
             )
             (output / "validation_history.json").write_text(
                 json.dumps(history, indent=2), encoding="utf-8"
@@ -390,6 +481,12 @@ def main(argv=None) -> int:
                 "source_speakers_seen": source_speakers,
                 "source_speaker_conditioning": False,
                 "voice_policy": "frozen X-VC target reference supplies voice; mapper edits content streams only",
+                "acoustic_objective": {
+                    "continuous_phone_cosine": args.lambda_acoustic,
+                    "discrete_target_code_nll": args.lambda_discrete_code,
+                    "code_temperature": args.code_temperature,
+                    "inference_decision_matched": bool(args.lambda_discrete_code),
+                },
                 "acceptance_policy": "must pass unseen-source MOS/WER/target-speaker-similarity listening gate",
                 "best_selection_score": best_score,
             },
@@ -397,7 +494,7 @@ def main(argv=None) -> int:
         ),
         encoding="utf-8",
     )
-    print(f"[done] best={output / 'best.pt'} last={output / 'last.pt'}")
+    print(f"[done] best={output / 'best.pt'} last={output / 'last.pt'}", flush=True)
     return 0
 
 

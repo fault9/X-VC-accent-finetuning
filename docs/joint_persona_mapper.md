@@ -88,3 +88,51 @@ tensorboard --logdir exp/joint_persona_mapper_asi --bind_all
 
 The checkpoint selector includes the worst validation source-speaker loss, so
 an arm cannot win solely by fitting one of the native training voices.
+
+## Discrete codebook-aware follow-up
+
+The first continuous-loss sweep preserved voice and naturalness but failed the
+accent gate for all 0/4/8-frame lookaheads.  Its strongest automatic result,
+8 frames, changed MOS by +0.0398 and target-speaker similarity by +0.026 while
+keeping WER at 0.0147, but classified 0/17 unseen-source renders as Indian and
+produced no audible accent difference in informal matched listening.
+Validation explained the failure: only about 0--0.2% of acoustic code ids
+changed.  The continuous code query could move closer to ASI embeddings while
+remaining inside the original native code's nearest-neighbour region; the
+hard codebook snap used by inference then discarded the edit.
+
+`phonewise_discrete_code_loss` closes that train/inference mismatch.  It
+computes cosine logits against X-VC's frozen 16,384-entry codebook and uses the
+real ASI target code id as a phone-local monotonic NLL target.  Source and
+target sequences remain pristine and unwarped.  The loss is normalized by
+`log(codebook_size)`, so a uniform prediction is approximately 1.0 and weights
+0.25/0.5/1.0 remain interpretable.
+
+Code churn alone is not evidence of accent learning.  Validation therefore
+holds a hard-DTW path fixed from untouched native/ASI code embeddings and
+reports:
+
+- `code_change_fraction`: how often edited ids differ from native ids;
+- `aligned_source_code_agreement`: native agreement with ASI on the fixed path;
+- `aligned_predicted_code_agreement`: edited agreement on that same path;
+- `aligned_target_code_gain`: the target-directed improvement between them.
+
+The guarded matrix keeps the same joint mapper, frozen X-VC renderer, ASI
+reference, pristine pairs, and unseen CLB/SLT evaluation:
+
+```bash
+cd ~/X-VC
+conda activate xvc
+
+mkdir -p exp/run_logs
+nohup bash scripts/run_joint_persona_discrete_sweep.sh \
+  > exp/run_logs/joint_persona_discrete_asi.out 2>&1 &
+
+tail -f exp/run_logs/joint_persona_discrete_asi.out
+```
+
+Defaults are the pre-registered 3x3 matrix: lookahead 0/4/8 frames and
+discrete weights 0.25/0.5/1.0.  This is intentionally a training-objective
+test, not a new architecture or a StreamVoice+ reimplementation.  An arm must
+show positive target-aligned code gain and pass the existing unseen-source
+MOS/WER/similarity/accent gate; matched listening remains decisive.

@@ -1818,3 +1818,29 @@ with automatic MOS, WER, target-speaker-similarity, and Indian-accent gates.
 
 See `docs/joint_persona_mapper.md` and
 `scripts/run_joint_persona_mapper_sweep.sh`.
+
+### Discrete codebook-aware joint mapper follow-up
+
+The initial 0/4/8-frame joint-mapper sweep preserved the frozen X-VC voice and
+quality pathway but failed the Indian-accent gate in every arm.  The 8-frame
+arm was the strongest metric result (MOS +0.0398, ASI similarity +0.026, WER
++0.0147), yet remained 0/17 Indian and had no audible matched-pair accent
+difference.  Validation code changes stayed around 0--0.2%, showing that the
+continuous acoustic cosine objective moved queries without crossing the hard
+codebook boundaries used at inference.
+
+Added an opt-in, inference-matched discrete objective rather than changing the
+mapper architecture.  Inside genuine matched-phone spans, frozen-codebook
+cosine logits now receive monotonic NLL supervision from real ASI code ids;
+no waveform or feature is warped.  Default behavior is unchanged when
+`--lambda-discrete-code=0`.  Validation additionally measures edited-vs-native
+agreement with ASI ids on one fixed hard-DTW path derived from untouched
+source/target embeddings, so arbitrary code churn cannot masquerade as target
+accent learning.
+
+`scripts/run_joint_persona_discrete_sweep.sh` queues the controlled 3x3 matrix
+(lookahead 0/4/8; discrete weight 0.25/0.5/1.0) against the same pristine ASI
+pairs, frozen X-VC renderer, fixed ASI reference, and prompt-disjoint unseen
+CLB/SLT evaluation.  It writes per-arm code-change and target-code-gain
+diagnostics before the existing MOS/WER/speaker-similarity/accent gate.  No
+new YAML configuration is introduced.

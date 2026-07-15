@@ -3,7 +3,13 @@ import unittest
 import torch
 
 from models.joint_accent_mapper import JointAccentMapper
-from xvc.training.monotonic import cosine_cost, phonewise_dual_stream_loss, soft_dtw
+from xvc.training.monotonic import (
+    cosine_cost,
+    phonewise_aligned_code_agreement,
+    phonewise_discrete_code_loss,
+    phonewise_dual_stream_loss,
+    soft_dtw,
+)
 
 
 class JointAccentMapperTest(unittest.TestCase):
@@ -68,6 +74,57 @@ class MonotonicLossTest(unittest.TestCase):
         self.assertEqual(phones, 1)
         self.assertTrue(torch.isfinite(predicted_semantic.grad).all())
         self.assertTrue(torch.isfinite(predicted_code.grad).all())
+
+    def test_discrete_code_loss_prefers_real_target_ids_and_backpropagates(self):
+        segments = [[{"src": [0, 2], "tgt": [0, 2], "confidence": 1.0}]]
+        target_indices = torch.tensor([[1, 1]])
+        good_logits = torch.tensor(
+            [[[0.0, 5.0, -1.0], [0.0, 5.0, -1.0]]], requires_grad=True
+        )
+        bad_logits = torch.tensor(
+            [[[5.0, 0.0, -1.0], [5.0, 0.0, -1.0]]], requires_grad=True
+        )
+        good_loss, good_phones = phonewise_discrete_code_loss(
+            good_logits, target_indices, segments
+        )
+        bad_loss, bad_phones = phonewise_discrete_code_loss(
+            bad_logits, target_indices, segments
+        )
+        self.assertEqual(good_phones, 1)
+        self.assertEqual(bad_phones, 1)
+        self.assertLess(float(good_loss), float(bad_loss))
+        good_loss.backward()
+        self.assertTrue(torch.isfinite(good_logits.grad).all())
+
+    def test_aligned_agreement_rewards_target_directed_not_arbitrary_changes(self):
+        codebook = torch.tensor([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]])
+        source_indices = torch.tensor([[0, 0, 0]])
+        target_indices = torch.tensor([[1, 1, 1]])
+        predicted_indices = torch.tensor([[1, 1, 1]])
+        source_code = codebook[source_indices].transpose(1, 2)
+        target_code = codebook[target_indices].transpose(1, 2)
+        segments = [[{"src": [0, 3], "tgt": [0, 3], "confidence": 1.0}]]
+        metrics = phonewise_aligned_code_agreement(
+            predicted_indices,
+            source_indices,
+            target_indices,
+            source_code,
+            target_code,
+            segments,
+        )
+        self.assertEqual(metrics["source"], 0.0)
+        self.assertEqual(metrics["predicted"], 1.0)
+        self.assertEqual(metrics["gain"], 1.0)
+        arbitrary = phonewise_aligned_code_agreement(
+            torch.tensor([[2, 2, 2]]),
+            source_indices,
+            target_indices,
+            source_code,
+            target_code,
+            segments,
+        )
+        self.assertEqual(arbitrary["predicted"], 0.0)
+        self.assertEqual(arbitrary["gain"], 0.0)
 
 
 if __name__ == "__main__":
