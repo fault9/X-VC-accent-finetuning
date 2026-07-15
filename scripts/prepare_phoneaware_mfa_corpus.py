@@ -148,6 +148,7 @@ def main() -> int:
     selected_root = args.out / "selected_manifests"
     selected_root.mkdir(parents=True, exist_ok=True)
     durations = {"source": 0.0, "target": 0.0}
+    unique_target_durations: dict[str, float] = {}
 
     for split, rows in splits.items():
         output_rows = []
@@ -157,15 +158,21 @@ def main() -> int:
             target_id = str(row["target_utt"])
             if target_id.endswith("_ft"):
                 target_id = target_id[:-3]
+            source_audio = pristine_path(row, "source")
+            target_audio = pristine_path(row, "target")
             durations["source"] += copy_utterance(
-                pristine_path(row, "source"),
+                source_audio,
                 prompts[prompt],
                 source_root / source_speaker(row) / source_id,
             )
-            durations["target"] += copy_utterance(
-                pristine_path(row, "target"),
+            target_duration = copy_utterance(
+                target_audio,
                 prompts[prompt],
                 target_root / args.target_speaker / target_id,
+            )
+            durations["target"] += target_duration
+            unique_target_durations.setdefault(
+                str(target_audio.resolve()), target_duration
             )
             enriched = dict(row)
             enriched.update({
@@ -189,6 +196,8 @@ def main() -> int:
         "prompt_overlap": 0,
         "source_minutes": round(durations["source"] / 60, 3),
         "target_minutes": round(durations["target"] / 60, 3),
+        "unique_target_recordings": len(unique_target_durations),
+        "unique_target_minutes": round(sum(unique_target_durations.values()) / 60, 3),
         "audio_policy": "pristine raw source and target; no warp or resampling",
         "sample_rate": 16000,
     }

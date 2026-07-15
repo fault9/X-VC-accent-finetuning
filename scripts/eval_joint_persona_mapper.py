@@ -70,7 +70,9 @@ def main(argv=None) -> int:
     if not source_paths:
         raise SystemExit(f"[error] no wavs under {args.source_dir}")
     mapper_payload = torch.load(args.mapper_ckpt, map_location="cpu")
-    if mapper_payload.get("model") not in {"JointAccentMapper", "PostPrenetAccentMapper"}:
+    if mapper_payload.get("model") not in {
+        "JointAccentMapper", "PostPrenetAccentMapper", "CausalPronunciationEditor"
+    }:
         raise SystemExit("[error] checkpoint is not a supported persona stream editor")
     seen = {str(value).casefold() for value in mapper_payload.get("source_speakers_seen", [])}
     eval_speakers = {speaker_from_name(path) for path in source_paths}

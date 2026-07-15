@@ -192,12 +192,52 @@ Evaluation synchronizes CUDA around every streaming window and records stock
 and mapper p50/p95 runtime. An arm fails if mapper p95 adds more than 10 ms or
 if total p95 exceeds the existing 120 ms current-chunk budget.
 
+## Post-prenet scale-up and pronunciation-editor experiment
+
+`scripts/run_postprenet4_experiments.sh` deliberately excludes the robotic
+pre-prenet/codebook arm. It compares only two 80 ms-lookahead candidates:
+
+1. `PostPrenetAccentMapper`, the existing length-preserving residual control;
+2. `CausalPronunciationEditor`, a recurrent post-prenet sequence model with
+   phone-sequence and phone-duration auxiliary supervision.
+
+Both preserve stock X-VC target-voice conditioning and output exactly one
+50 Hz frame per input frame. The pronunciation editor learns three auxiliary
+duration classes—shorten, keep, and lengthen—from real native/ASI MFA interval
+ratios. V1 does **not** execute hard repeat/drop actions at runtime. This is an
+intentional safety boundary: the earlier discrete editor showed that large
+hard representation changes can sound vibratory/robotic. The duration task
+instead teaches the recurrent trunk pronunciation context while the rendered
+path remains smooth and fixed-rate. Any later variable-length action policy
+requires a separate WER/MOS/latency gate.
+
+The serious experiment trains on `hindi_asi_pristine_parallel_scaleup`: real,
+prompt-matched native/ASI recordings with at least 45 unique ASI minutes and
+four native training speakers. It does not train on L10 synthetic teachers,
+self-pairs, warped latent targets, or the 15 s reference file. MFA remains an
+offline label source only; no transcript or aligner runs in live conversion.
+
+On the GPU container:
+
+```bash
+mkdir -p exp/run_logs
+nohup bash scripts/run_postprenet4_experiments.sh \
+  > exp/run_logs/postprenet4_experiments.out 2>&1 &
+tail -f exp/run_logs/postprenet4_experiments.out
+```
+
+The default runner derives steps from 20 exposure epochs rather than fixing
+3000 steps regardless of dataset size. Set `ARMS=pronunciation` to run only
+the new editor. A two-step wiring smoke test may relax the scale gates via
+environment variables, but such a run is not evidence about accent quality.
+
 ## Remaining limits
 
-- The length-preserving mapper cannot insert or delete frames. A duration head
-  is justified only after an arm adds audible accent without harming voice.
-- Training currently has two native source speakers. Unseen CLB/SLT evaluation
-  is mandatory, but more training voices would strengthen an "any source" claim.
+- Both deployable v1 editors are length-preserving. The pronunciation editor's
+  duration head is auxiliary until it demonstrates useful prediction without
+  harming rendered voice/quality.
+- The 221-pair pilot has two native source speakers. The scale-up experiment
+  requires four; evaluation must then use entirely different speakers.
 - Each training pair currently yields two deterministic 2.4 s source/target
   windows and each validation pair yields one. This increases window placement
   diversity without pretending that correlated crops are new speakers.

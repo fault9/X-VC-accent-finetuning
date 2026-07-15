@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from models.joint_accent_mapper import JointAccentMapper, PostPrenetAccentMapper
+from models.pronunciation_editor import CausalPronunciationEditor
 
 
 def _codebook_sha256(codebook: torch.Tensor) -> str:
@@ -105,6 +106,13 @@ def load_persona_stream_editor(
     elif model_name == "PostPrenetAccentMapper":
         mapper = PostPrenetAccentMapper(**config)
         stage = "post_prenet"
+    elif model_name == "CausalPronunciationEditor":
+        mapper = CausalPronunciationEditor(**config)
+        stage = "post_prenet"
+        if payload.get("duration_actions_runtime_enabled") is True:
+            raise ValueError(
+                "v1 pronunciation checkpoints may not apply hard duration actions"
+            )
     else:
         raise ValueError(f"unsupported persona-editor model: {model_name!r}")
 

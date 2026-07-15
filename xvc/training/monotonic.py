@@ -120,6 +120,103 @@ def phonewise_single_stream_loss(
     return total / weight_total, phones
 
 
+def phone_sequence_single_stream_loss(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    phone_segments: list[list[dict]],
+    *,
+    gamma: float = 0.1,
+) -> tuple[torch.Tensor, int]:
+    """Align one ordered multi-phone sequence per item without warping it.
+
+    Matched phone interiors are concatenated in transcript order before one
+    soft-DTW comparison.  This preserves cross-phone sequence context while
+    excluding uncertain silence and phone-boundary frames.
+    """
+    total = predicted.new_zeros(())
+    weight_total = 0.0
+    items = 0
+    for batch_index, segments in enumerate(phone_segments):
+        usable = [
+            segment for segment in segments
+            if segment["src"][1] > segment["src"][0]
+            and segment["tgt"][1] > segment["tgt"][0]
+        ]
+        if not usable:
+            continue
+        source = torch.cat(
+            [
+                predicted[batch_index, :, segment["src"][0]:segment["src"][1]]
+                for segment in usable
+            ],
+            dim=-1,
+        )
+        destination = torch.cat(
+            [
+                target[batch_index, :, segment["tgt"][0]:segment["tgt"][1]]
+                for segment in usable
+            ],
+            dim=-1,
+        )
+        weight = sum(float(segment.get("confidence", 1.0)) for segment in usable)
+        weight /= len(usable)
+        total = total + weight * soft_dtw(cosine_cost(source, destination), gamma)
+        weight_total += weight
+        items += 1
+    if items == 0:
+        raise ValueError("batch contains no usable matched phone sequences")
+    return total / weight_total, items
+
+
+def phone_duration_class_targets(
+    phone_segments: list[list[dict]],
+    frames: int,
+    device: torch.device,
+    *,
+    shorten_threshold: float = 0.85,
+    lengthen_threshold: float = 1.15,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return per-source-frame shorten/keep/lengthen labels and weights."""
+    if not 0 < shorten_threshold < 1 < lengthen_threshold:
+        raise ValueError("duration thresholds must straddle 1.0")
+    labels = torch.ones((len(phone_segments), frames), dtype=torch.long, device=device)
+    weights = torch.zeros((len(phone_segments), frames), dtype=torch.float32, device=device)
+    for batch_index, segments in enumerate(phone_segments):
+        for segment in segments:
+            source_start, source_end = segment["src"]
+            target_start, target_end = segment["tgt"]
+            if source_end <= source_start or target_end <= target_start:
+                continue
+            # Existing stream metadata defines duration_ratio as
+            # source_duration / target_duration. Therefore a value below one
+            # means the target realization is longer and requires LENGTHEN.
+            ratio = float(
+                segment.get(
+                    "duration_ratio",
+                    (source_end - source_start) / (target_end - target_start),
+                )
+            )
+            label = 2 if ratio < shorten_threshold else 0 if ratio > lengthen_threshold else 1
+            confidence = float(segment.get("confidence", 1.0))
+            source_start = max(0, min(frames, source_start))
+            source_end = max(source_start, min(frames, source_end))
+            existing = weights[batch_index, source_start:source_end]
+            replace = confidence >= existing
+            labels[batch_index, source_start:source_end] = torch.where(
+                replace,
+                torch.full_like(labels[batch_index, source_start:source_end], label),
+                labels[batch_index, source_start:source_end],
+            )
+            weights[batch_index, source_start:source_end] = torch.where(
+                replace,
+                torch.full_like(existing, confidence),
+                existing,
+            )
+    if not torch.count_nonzero(weights):
+        raise ValueError("batch contains no duration-supervised phone frames")
+    return labels, weights
+
+
 def phonewise_discrete_code_loss(
     code_logits: torch.Tensor,
     target_code_indices: torch.Tensor,

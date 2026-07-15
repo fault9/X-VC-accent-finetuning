@@ -3,13 +3,16 @@ import unittest
 import torch
 
 from models.joint_accent_mapper import JointAccentMapper, PostPrenetAccentMapper
+from models.pronunciation_editor import CausalPronunciationEditor
 from scripts.train_joint_persona_mapper import context_valid_items
 from xvc.runtime.persona_editor import PersonaStreamEditor
 from xvc.training.monotonic import (
     cosine_cost,
     phonewise_aligned_code_agreement,
+    phone_duration_class_targets,
     phonewise_discrete_code_loss,
     phonewise_dual_stream_loss,
+    phone_sequence_single_stream_loss,
     phonewise_target_code_margin_loss,
     soft_dtw,
 )
@@ -65,6 +68,21 @@ class JointAccentMapperTest(unittest.TestCase):
         ).eval()
         hidden = torch.randn(2, 12, 9)
         torch.testing.assert_close(mapper(hidden), hidden)
+
+    def test_pronunciation_editor_starts_as_identity_and_emits_duration_logits(self):
+        editor = CausalPronunciationEditor(
+            input_dim=12, hidden=16, layers=1, lookahead_frames=2,
+            required_history_frames=4, input_dropout=0.0,
+        ).eval()
+        hidden = torch.randn(2, 12, 20)
+        edited, delta, actions = editor(hidden, return_aux=True)
+        torch.testing.assert_close(edited, hidden)
+        torch.testing.assert_close(delta, torch.zeros_like(delta))
+        self.assertEqual(actions.shape, (2, 3, 20))
+        self.assertTrue(torch.all(actions.argmax(dim=1) == 1))
+        editor.validate_stream_window(history_ms=80, smooth_ms=20, future_ms=20)
+        with self.assertRaises(ValueError):
+            editor.validate_stream_window(history_ms=80, smooth_ms=0, future_ms=20)
 
     def test_context_filter_uses_all_causally_valid_window_frames(self):
         item = {
@@ -210,6 +228,34 @@ class MonotonicLossTest(unittest.TestCase):
         self.assertEqual(phones, 1)
         self.assertTrue(torch.isfinite(predicted_semantic.grad).all())
         self.assertTrue(torch.isfinite(predicted_code.grad).all())
+
+    def test_sequence_loss_concatenates_ordered_phone_interiors(self):
+        predicted = torch.randn(1, 4, 10, requires_grad=True)
+        target = torch.randn(1, 4, 12)
+        segments = [[
+            {"src": [1, 4], "tgt": [2, 6], "confidence": 0.9},
+            {"src": [6, 9], "tgt": [8, 11], "confidence": 1.0},
+        ]]
+        loss, items = phone_sequence_single_stream_loss(
+            predicted, target, segments
+        )
+        loss.backward()
+        self.assertEqual(items, 1)
+        self.assertTrue(torch.isfinite(predicted.grad).all())
+
+    def test_duration_targets_encode_phone_length_ratio(self):
+        segments = [[
+            {"src": [1, 3], "tgt": [1, 2], "duration_ratio": 0.5},
+            {"src": [4, 6], "tgt": [4, 6], "duration_ratio": 1.0},
+            {"src": [7, 9], "tgt": [7, 11], "duration_ratio": 2.0},
+        ]]
+        labels, weights = phone_duration_class_targets(
+            segments, 12, torch.device("cpu")
+        )
+        self.assertEqual(labels[0, 1:3].tolist(), [2, 2])
+        self.assertEqual(labels[0, 4:6].tolist(), [1, 1])
+        self.assertEqual(labels[0, 7:9].tolist(), [0, 0])
+        self.assertEqual(int(torch.count_nonzero(weights)), 6)
 
     def test_discrete_code_loss_prefers_real_target_ids_and_backpropagates(self):
         segments = [[{"src": [0, 2], "tgt": [0, 2], "confidence": 1.0}]]
