@@ -91,21 +91,31 @@ sources. The scale-up runner fails closed unless its dataset has:
   do not increase this number); and
 - prompt-disjoint evaluation speakers absent from training.
 
-Build the larger input from the wide manifest's `raw_source_wav_path` and
-`raw_target_wav_path` fields. The wide dataset is used only as an index of
-pristine shared-prompt recordings; its warped audio/features are never used.
-Run `prepare_phoneaware_mfa_corpus.py`, the metadata-only MFA queue, and then
-`build_pristine_parallel_dataset.py` exactly as above, but write the result to
-`data/hindi_asi_pristine_parallel_scaleup`. Do not satisfy the gate by pairing
-one ASI utterance with several native speakers: the unique-ASI-minutes check
-is specifically intended to catch that.
+Build the larger input directly from pristine L1/L2-ARCTIC WAVs with
+`select_pristine_persona_pairs.py`. It uses each ASI utterance once by default
+and rotates source speakers across prompts. Then run
+`prepare_phoneaware_mfa_corpus.py`, the metadata-only MFA queue, and
+`build_pristine_parallel_dataset.py`. Do not satisfy the gate by pairing one
+ASI utterance with several native speakers: the unique-ASI-minutes check is
+specifically intended to catch that.
 
-For example, if the wide dataset still contains pristine-path fields:
+For example, on WSL (adjust the four source globs to the local L1-ARCTIC
+layout and the target glob to the pristine ASI directory):
 
 ```bash
+python scripts/select_pristine_persona_pairs.py \
+  --source 'bdl=/path/to/L1-ARCTIC/**/bdl/**/*.wav' \
+  --source 'rms=/path/to/L1-ARCTIC/**/rms/**/*.wav' \
+  --source 'clb=/path/to/L1-ARCTIC/**/clb/**/*.wav' \
+  --source 'slt=/path/to/L1-ARCTIC/**/slt/**/*.wav' \
+  --target-glob '/path/to/L2-ARCTIC/ASI/**/*.wav' \
+  --target-speaker ASI \
+  --val-prompts 50 \
+  --out data/hindi_asi_scaleup_selection
+
 python scripts/prepare_phoneaware_mfa_corpus.py \
-  --train-manifest data/crosspair_hindi_latent_wide_v2/manifests/train.jsonl \
-  --val-manifest data/crosspair_hindi_latent_wide_v2/manifests/val.jsonl \
+  --train-manifest data/hindi_asi_scaleup_selection/train.jsonl \
+  --val-manifest data/hindi_asi_scaleup_selection/val.jsonl \
   --prompts-file /path/to/L2-ARCTIC/PROMPTS \
   --target-speaker ASI \
   --out data/mfa_hindi_phoneaware_asi_scaleup
