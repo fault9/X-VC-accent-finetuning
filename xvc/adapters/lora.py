@@ -1,6 +1,6 @@
 """Minimal, auditable LoRA for X-VC accent adapters.
 
-Design goals (see CHANGES.md "LoRA accent adapters"):
+Design goals:
 
   * **Checkpoint-compatible.** `LoRALinear` subclasses `nn.Linear`, so the base
     `weight`/`bias` keep their ORIGINAL parameter names. A stock X-VC checkpoint

@@ -54,12 +54,23 @@ if [[ "$(find "$SOURCE_DIR" -maxdepth 1 -type f -name '*.wav' | wc -l)" -lt 10 ]
   echo "[error] require at least 10 unseen-source wavs under $SOURCE_DIR" >&2
   exit 1
 fi
-if command -v nvidia-smi >/dev/null 2>&1; then
-  free_gpu_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  if [[ "$free_gpu_mib" =~ ^[0-9]+$ ]] && (( free_gpu_mib < MIN_FREE_GPU_MIB )); then
-    echo "[error] only ${free_gpu_mib} MiB GPU memory free; require ${MIN_FREE_GPU_MIB} MiB" >&2
-    exit 1
-  fi
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "[error] nvidia-smi is unavailable; this run requires a GPU container" >&2
+  exit 70
+fi
+if ! gpu_memory="$(nvidia-smi --query-gpu=memory.free \
+    --format=csv,noheader,nounits 2>/dev/null)"; then
+  echo "[error] NVML is unavailable; restart the GPU container before training" >&2
+  exit 70
+fi
+free_gpu_mib="$(printf '%s\n' "$gpu_memory" | head -n1 | tr -d '[:space:]')"
+if [[ ! "$free_gpu_mib" =~ ^[0-9]+$ ]]; then
+  echo "[error] could not parse free GPU memory from nvidia-smi" >&2
+  exit 70
+fi
+if (( free_gpu_mib < MIN_FREE_GPU_MIB )); then
+  echo "[error] only ${free_gpu_mib} MiB GPU memory free; require ${MIN_FREE_GPU_MIB} MiB" >&2
+  exit 1
 fi
 
 mkdir -p "$EXP_ROOT" exp/run_logs

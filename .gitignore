@@ -42,8 +42,23 @@ ckpts/
 *.bin
 *.safetensors
 
-# HF publishing credentials (written by scripts/finetune.sh link prompt)
+# Local publishing credentials
 .hf_publish.env
+
+# Local research notes and assistant working files. These may exist in a
+# developer checkout, but they are not part of the reproducible pipeline.
+/CHANGES.md
+/changes.md
+/CLAUDE.md
+/claude.md
+/MIGRATION.md
+/migration.md
+/REFACTOR_PLAN.md
+/refactor_plan.md
+/exclude_bad_alignments.txt
+
+# Dataset transfer archives are local artifacts, never source files.
+/*.tgz
 
 # Local data
 /data/

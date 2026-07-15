@@ -28,7 +28,7 @@ converter_module = pytest.importorskip(
     reason="needs x-transformers/einops (pip install -r requirements.txt)",
 )
 
-# The include sets used by the experiment configs (see configs/adapter/).
+# Representative include sets used by the retained LoRA compatibility layer.
 CONVERTER_INCLUDE = ["attn.", "ff_x.ff", "ff_c.ff"]
 ADALN_INCLUDE = ["attn_norm_x.", "norm_out."]
 

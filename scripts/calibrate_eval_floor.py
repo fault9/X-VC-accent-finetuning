@@ -4,8 +4,8 @@ checkpoint under test. This calibrates what the proxies CAN return for genuinely
 natural, genuinely accented human speech, so run tables are read against the
 achievable ceiling instead of an imagined 3.7-MOS / 20-of-20-indian ideal.
 
-Why (see CHANGES.md "Pilot results"): UTMOS-style MOS predictors and Whisper WER
-both systematically score accented / non-studio speech lower. Every fine-tune so
+UTMOS-style MOS predictors and Whisper WER can systematically score accented /
+non-studio speech lower. Every fine-tune so
 far "loses" a MOS point before the accent even registers — this script answers
 whether that loss is model artifacts or the measuring stick.
 

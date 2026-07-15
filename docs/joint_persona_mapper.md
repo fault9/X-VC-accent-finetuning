@@ -71,12 +71,14 @@ tail -f exp/run_logs/joint_persona_mapper_asi.out
 ```
 
 The default controlled sweep trains 0, 80, and 160 ms lookahead arms. It
-extracts paired streams once, evaluates every arm on `data/eval_sources`, and
+extracts paired streams once, evaluates every arm on
+`data/eval_sources_joint_persona_clean`, and
 writes `exp/joint_persona_mapper_asi/status.tsv`. Passing an automatic gate is
 necessary but not sufficient: matched stock/mapper files must also be blindly
 auditioned.
 
-`data/eval_sources` must therefore contain at least two speakers not used for
+`data/eval_sources_joint_persona_clean` must therefore contain at least two
+speakers not used for
 training (for example CLB and SLT). Set `MIN_UNSEEN_SPEAKERS=1` only for a
 short plumbing smoke test; such a result cannot support an any-source claim.
 

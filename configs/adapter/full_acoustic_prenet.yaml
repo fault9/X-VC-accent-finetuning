@@ -1,5 +1,0 @@
-# Adapter group: full-weight fine-tuning of acoustic_converter + prenet
-# ("Option A" — no LoRA; the whitelist freeze keeps everything else frozen).
-model:
-  generator:
-    trainable_modules: [acoustic_converter, prenet]

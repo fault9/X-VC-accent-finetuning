@@ -4,13 +4,134 @@
 from __future__ import annotations
 
 import argparse
+import collections
+import csv
 import json
+import math
 import sys
 from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "scripts"))
+
+ACCENT_DEPTH = {"indian": 2.0, "england": 1.0}
+
+
+def _mean(values: Iterable[Optional[float]]) -> Optional[float]:
+    vals = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
+    return round(value, digits) if value is not None else None
+
+
+def _read_manifests(root: Path) -> Tuple[Dict[str, List[dict]], Dict[str, dict]]:
+    splits: Dict[str, List[dict]] = {}
+    by_target: Dict[str, dict] = {}
+    for split in ("train", "val"):
+        path = root / "manifests" / f"{split}.jsonl"
+        if not path.is_file():
+            raise SystemExit(f"[error] missing render manifest: {path}")
+        rows = []
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            row["_split"] = split
+            row["_manifest_line"] = lineno
+            target_name = Path(row["target_wav_path"]).name
+            if target_name in by_target:
+                raise SystemExit(
+                    f"[error] duplicate target basename {target_name!r} in {root}"
+                )
+            by_target[target_name] = row
+            rows.append(row)
+        splits[split] = rows
+    return splits, by_target
+
+
+def _source_reference(row: dict, whisper, cache: Dict[str, tuple]):
+    from eval_checkpoints import norm_text
+
+    source = Path(row["source_wav_path"])
+    key = str(source)
+    if key in cache:
+        return cache[key]
+    if not source.is_file():
+        raise FileNotFoundError(f"source wav missing: {source}")
+    sidecar = source.with_suffix(".txt")
+    if sidecar.is_file():
+        result = (norm_text(sidecar.read_text(encoding="utf-8")), "ref_text")
+    else:
+        result = (norm_text(whisper.transcribe(str(source))), "asr_source_proxy")
+    cache[key] = result
+    return result
+
+
+def _load_similarity_scorer(args):
+    import torch
+    from bins.infer_utils import load_pair_as_tensors, load_xvc, precompute_conditions
+
+    cfg, model, device = load_xvc(args.config, args.ckpt, args.xvc_device, False)
+    hop = int(cfg["latent_hop_length"])
+    _, target, target_cond = load_pair_as_tensors(
+        args.reference, args.reference, cfg, device, hop, True
+    )
+    with torch.inference_mode():
+        reference_embedding, _ = precompute_conditions(model, target, target_cond)
+    return cfg, model, device, reference_embedding
+
+
+def _similarity(path: Path, scorer) -> float:
+    import numpy as np
+    import soundfile as sf
+    import torch
+    import torch.nn.functional as F
+    from eval_checkpoints import maybe_resample
+
+    cfg, model, device, reference_embedding = scorer
+    wav, sample_rate = sf.read(str(path), always_2d=False)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    wav, _ = maybe_resample(wav, sample_rate, int(cfg["sample_rate"]))
+    with torch.inference_mode():
+        tensor = torch.from_numpy(np.ascontiguousarray(wav)).float().to(device)
+        embedding, _ = model.speaker_encoder(tensor.view(1, 1, -1))
+        return float(
+            F.cosine_similarity(
+                embedding.flatten(1), reference_embedding.flatten(1)
+            ).item()
+        )
+
+
+def _summarize(label: str, rows: List[dict]) -> dict:
+    labels = collections.Counter(row["accent_label"] for row in rows)
+    return {
+        "set": label,
+        "n": len(rows),
+        "mos_mean": _round(_mean(row["mos_pred"] for row in rows)),
+        "mos_min": _round(min((row["mos_pred"] for row in rows), default=None)),
+        "wer_mean": _round(_mean(row["wer"] for row in rows)),
+        "sim_mean": _round(_mean(row["sim_cosine"] for row in rows)),
+        "accent_depth_mean": _round(
+            _mean(ACCENT_DEPTH.get(row["accent_label"], 0.0) for row in rows)
+        ),
+        "indian_frac": _round(
+            _mean(1.0 if row["accent_label"] == "indian" else 0.0 for row in rows)
+        ),
+        "accent_hist": " ".join(f"{k}:{v}" for k, v in labels.most_common()),
+    }
+
+
+def _write_csv(path: Path, rows: List[dict], fieldnames: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main(argv=None) -> int:
@@ -34,16 +155,6 @@ def main(argv=None) -> int:
         norm_text,
         word_error_rate,
     )
-    from gate_teacher_renders import (
-        ACCENT_DEPTH,
-        _load_similarity_scorer,
-        _read_manifests,
-        _similarity,
-        _source_reference,
-        _summarize,
-        _write_csv,
-    )
-
     audit_root = Path(args.audit_root)
     meta_path = audit_root / "audit_meta.json"
     if not meta_path.is_file():

@@ -39,15 +39,25 @@ else
   input_label="dataset root: $DATASET_ROOT"
 fi
 
-if command -v nvidia-smi >/dev/null 2>&1; then
-  free_gpu_mib="$(nvidia-smi --query-gpu=memory.free \
-    --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d '[:space:]')"
-  if [[ "$free_gpu_mib" =~ ^[0-9]+$ ]] && (( free_gpu_mib < MIN_FREE_GPU_MIB )); then
-    echo "[error] only ${free_gpu_mib} MiB GPU memory free; require ${MIN_FREE_GPU_MIB} MiB" >&2
-    echo "Stop Hear-Me-Out/other GPU jobs, then rerun. Override only if intentional:" >&2
-    echo "  MIN_FREE_GPU_MIB=<value> bash scripts/run_xvc_accent_stream_audit.sh" >&2
-    exit 1
-  fi
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "[error] nvidia-smi is unavailable; this audit requires a GPU container" >&2
+  exit 70
+fi
+if ! gpu_memory="$(nvidia-smi --query-gpu=memory.free \
+    --format=csv,noheader,nounits 2>/dev/null)"; then
+  echo "[error] NVML is unavailable; restart the GPU container before rendering" >&2
+  exit 70
+fi
+free_gpu_mib="$(printf '%s\n' "$gpu_memory" | head -n1 | tr -d '[:space:]')"
+if [[ ! "$free_gpu_mib" =~ ^[0-9]+$ ]]; then
+  echo "[error] could not parse free GPU memory from nvidia-smi" >&2
+  exit 70
+fi
+if (( free_gpu_mib < MIN_FREE_GPU_MIB )); then
+  echo "[error] only ${free_gpu_mib} MiB GPU memory free; require ${MIN_FREE_GPU_MIB} MiB" >&2
+  echo "Stop Hear-Me-Out/other GPU jobs, then rerun. Override only if intentional:" >&2
+  echo "  MIN_FREE_GPU_MIB=<value> bash scripts/run_xvc_accent_stream_audit.sh" >&2
+  exit 1
 fi
 
 echo "=== X-VC ACCENT STREAM AUDIT ==="

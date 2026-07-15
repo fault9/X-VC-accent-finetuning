@@ -154,74 +154,44 @@ Minimal example:
 {"source_utt":"utt_0001","source_wav_path":"<path_to_source>","target_utt":"utt_0002","target_wav_path":"<path_to_target>"}
 ```
 
-## Accent Fine-tuning (L2-ARCTIC)
+## Hindi target-persona research pipeline
 
-This fork adds a reproducible pipeline to fine-tune X-VC on L2-ARCTIC accent groups
-(Arabic, Spanish, Chinese, Hindi — 2 speakers each, 1M+1F, the study's exact
-conversion-target voices) plus a native CMU-ARCTIC reference group, starting from
-the released X-VC checkpoint.
+This fork keeps the original X-VC layout and adds one focused research path:
+make arbitrary English source speakers sound like the ASI target persona (ASI
+voice plus Hindi/Indian-English pronunciation) while the released X-VC model
+remains frozen.
 
-- **Method and rationale (for reviewers):** [`CHANGES.md`](CHANGES.md)
-- **Step-by-step operator guide:** [`docs/finetuning.md`](docs/finetuning.md)
-- **Phone-aware AccentBridge experiment:**
-  [`docs/phoneaware_accentbridge.md`](docs/phoneaware_accentbridge.md)
-- **Hindi/ASI semantic-vs-acoustic stream audit:**
-  [`docs/xvc_accent_stream_audit.md`](docs/xvc_accent_stream_audit.md)
-- **Source-agnostic joint target-persona mapper:**
-  [`docs/joint_persona_mapper.md`](docs/joint_persona_mapper.md)
-- **Code architecture / refactor map:** [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md),
-  [`docs/architecture.md`](docs/architecture.md)
+The maintained workflow is:
 
-### Consolidated entry points
+1. build and validate pristine prompt-matched native/ASI recordings;
+2. use MFA phone tiers as alignment metadata only (never warp training audio);
+3. localize accent information with a semantic/acoustic stream-swap audit;
+4. train a small causal joint semantic/acoustic mapper; and
+5. evaluate on unseen source speakers against matched stock-X-VC controls.
 
-```bash
-pip install -e .                                   # installs the xvc package
-pytest tests/                                      # CPU test suite (no GPU, no checkpoints)
+Start with the fresh-container and asset checklist in
+[`docs/environment.md`](docs/environment.md). The maintained experiment and
+data contracts are documented in:
 
-python scripts/train.py experiment=lora_hindi_asi_r4          # train (see docs/training.md)
-python scripts/infer.py checkpoint=exp/<run>/ckpt/000100.pt \
-    source=src.wav target=ref.wav output=out.wav              # convert (docs/inference.md)
-python scripts/validate_dataset.py data/<crosspair_root>      # dataset preflight
-python scripts/inspect_checkpoint.py <file.pt>                # what is in this checkpoint?
-```
+- [`docs/datasets.md`](docs/datasets.md)
+- [`docs/mfa_phone_alignment.md`](docs/mfa_phone_alignment.md)
+- [`docs/xvc_accent_stream_audit.md`](docs/xvc_accent_stream_audit.md)
+- [`docs/joint_persona_mapper.md`](docs/joint_persona_mapper.md)
 
-Experiments compose config groups under
-`configs/{model,adapter,dataset,training,experiment}/`
-([`configs/LEGACY_MAPPING.md`](configs/LEGACY_MAPPING.md)); LoRA / freezing /
-dataset-schema / checkpoint utilities live in the `xvc/` package
-([`docs/lora.md`](docs/lora.md), [`docs/datasets.md`](docs/datasets.md),
-[`docs/checkpoints.md`](docs/checkpoints.md)). All historical commands keep
-working — see [`MIGRATION.md`](MIGRATION.md).
-
-Reusable phone-tier parsing and sequence matching live in
-`xvc.data.phone_supervision`; MFA corpus preparation, alignment, annotation,
-and controlled sweep commands remain explicit operator scripts under
-`scripts/`.
-
-Quick start:
+The registered discrete-code experiment is launched with:
 
 ```bash
-python scripts/prepare_finetuning_data.py select          # curate from raw corpora
-python scripts/prepare_finetuning_data.py manifest --joint
-python scripts/eval_checkpoints.py make-targets           # pin eval reference clips
-python bins/smoke_test.py --stage all --config configs/finetune_arabic.yaml
-python bins/smoke_test.py --stage train --config configs/finetune_arabic.yaml  # full loop
-bash scripts/finetune.sh --accent joint                   # or: --accent all
-python scripts/eval_checkpoints.py run --run-dir exp/finetune_joint \
-    --source-dir data/eval_sources --targets-dir data/eval_targets \
-    --include-base ckpts/xvc.pt                           # checkpoint selection curves
+bash scripts/run_joint_persona_discrete_sweep.sh
 ```
 
-"Option A" baseline: warm-start the released checkpoint, freeze everything except
-`acoustic_converter` and `prenet`, and train in self-reconstruction mode. See
-[`configs/finetune_arabic.yaml`](configs/finetune_arabic.yaml) and the two documents above.
+Historical sweep YAMLs and one-off DTW, LoRA, distillation, and teacher-scale
+runners are intentionally not retained on this branch. Experiment outputs,
+datasets, checkpoints, transfer archives, and local research notes remain
+outside git.
 
 ## Acknowledgements
 
 This codebase builds upon open-source components from [SAC](https://github.com/Soul-AILab/SAC) and the broader audio generation ecosystem.
-
-The accent fine-tuning pipeline builds on the original **X-VC** release
-(https://github.com/Jerrister/X-VC); the project remains under the MIT License (see [`LICENSE`](LICENSE)).
 
 ## Citation
 

@@ -1,8 +1,0 @@
-# Model group: the full X-VC 16 kHz tree (all submodules, losses, audio
-# constants, default dataloader/trainer plumbing).
-#
-# This IS the legacy configs/xvc.yaml — referenced, not copied, so the two can
-# never drift and every composed experiment resolves to exactly the tree the
-# legacy overlays produced. tests/unit/test_config_composition.py verifies
-# resolved-tree equality against the legacy configs.
-base_config: configs/xvc.yaml

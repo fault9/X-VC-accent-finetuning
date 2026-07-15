@@ -31,7 +31,6 @@ Typical use (GPU container):
         --run-dir exp/finetune_arabic \
         --source-dir data/eval_sources \
         --targets-dir data/eval_targets \
-        --evaluation-plan configs/eval_hindi_native_to_accent.json \
         --include-base ckpts/xvc.pt
 
 WER references: put a sidecar ``<clip>.txt`` next to each source wav, or pass
