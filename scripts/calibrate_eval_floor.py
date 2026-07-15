@@ -194,7 +194,8 @@ def main(argv=None) -> int:
     out_root.mkdir(parents=True, exist_ok=True)
     rows = []
     fieldnames = ["set", "clip", "speaker", "sim_cosine", "wer", "wer_mode",
-                  "mos_pred", "dur_s", "sr", "accent_label", "accent_conf", "lufs"]
+                  "mos_pred", "dur_s", "sr", "accent_label", "accent_conf",
+                  "indian_prob", "lufs"]
 
     for label, pattern, clips in sets:
         print(f"\n=== set {label} ({len(clips)} clips, {pattern}) ===")
@@ -203,9 +204,10 @@ def main(argv=None) -> int:
             scored, ssr = maybe_resample(wav, sr, args.score_sr)
             mos = round(mos_model.score(scored, ssr), 3) if mos_model else None
 
-            alabel = aconf = None
+            alabel = aconf = indian_prob = None
             if accent_clf:
-                alabel, aconf = accent_clf.classify(str(clip))
+                alabel, aconf, posterior = accent_clf.classify_detailed(str(clip))
+                indian_prob = posterior["indian"]
                 aconf = round(aconf, 4)
 
             wer = wmode = None
@@ -232,6 +234,7 @@ def main(argv=None) -> int:
                 "sim_cosine": sim, "wer": wer, "wer_mode": wmode, "mos_pred": mos,
                 "dur_s": round(len(wav) / sr, 3), "sr": sr,
                 "accent_label": alabel, "accent_conf": aconf,
+                "indian_prob": round(indian_prob, 6) if indian_prob is not None else None,
                 "lufs": _lufs(wav, sr),
             })
             print(f"  {clip.stem:<28} mos={mos} accent={alabel} wer={wer} sim={sim}")
@@ -262,6 +265,7 @@ def main(argv=None) -> int:
             "n_sim": sum(1 for r in sub if r["sim_cosine"] is not None),
             "indian_frac": _mean([1.0 if r["accent_label"] == "indian" else 0.0
                                   for r in sub if r["accent_label"]]),
+            "indian_prob_mean": _mean([r["indian_prob"] for r in sub]),
             "accent_hist": top,
         })
     with open(out_root / "summary.csv", "w", newline="", encoding="utf-8") as f:
@@ -280,7 +284,8 @@ def main(argv=None) -> int:
         print(f"  {s['set']:<16} n={s['n']:<4} mos={s['mos_mean']} "
               f"(std {s['mos_std']}) wer={s['wer_mean']} (n={s['n_wer']}) "
               f"sim={s['sim_mean']} (n={s['n_sim']}) "
-              f"indian_frac={s['indian_frac']} [{s['accent_hist']}]")
+              f"indian_frac={s['indian_frac']} p={s['indian_prob_mean']} "
+              f"[{s['accent_hist']}]")
     return 0
 
 

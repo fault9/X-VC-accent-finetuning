@@ -239,9 +239,28 @@ class AccentClassifier:
             run_opts={"device": device},
         )
 
-    def classify(self, wav_path: str):
+    def classify_detailed(self, wav_path: str):
+        """Return the winning label and the complete 16-class posterior."""
+        import torch
+
         out_prob, score, index, label = self.clf.classify_file(wav_path)
-        return label[0], float(score.exp().item() if hasattr(score, "exp") else score)
+        probabilities = out_prob.detach().float().exp().reshape(-1)
+        encoder = self.clf.hparams.label_encoder
+        labels = list(encoder.decode_torch(torch.arange(probabilities.numel())))
+        posterior = {
+            str(name).casefold(): float(probabilities[position].item())
+            for position, name in enumerate(labels)
+        }
+        if "indian" not in posterior:
+            raise RuntimeError(
+                f"CommonAccent label encoder has no 'indian' class: {labels}"
+            )
+        winning = str(label[0]).casefold()
+        return winning, posterior[winning], posterior
+
+    def classify(self, wav_path: str):
+        label, confidence, _ = self.classify_detailed(wav_path)
+        return label, confidence
 
 
 class MOSPredictor:
@@ -496,7 +515,8 @@ def cmd_run(args) -> int:
     rows = []
     fieldnames = ["step", "mode", "source", "target", "sim_cosine", "wer", "wer_mode",
                   "mos_pred", "dur_source_s", "dur_out_s", "dur_delta_pct",
-                  "accent_label", "accent_conf", "lufs_in", "avg_latency_ms", "out_path"]
+                  "accent_label", "accent_conf", "indian_prob", "lufs_in",
+                  "avg_latency_ms", "out_path"]
 
     for ck in ckpts:
         step = ck["step"]
@@ -563,9 +583,12 @@ def cmd_run(args) -> int:
                     ref, wmode = wer_ref[src.stem]
                     wer = round(word_error_rate(ref, hyp), 4)
 
-                alabel = aconf = None
+                alabel = aconf = indian_prob = None
                 if accent_clf is not None:
-                    alabel, aconf = accent_clf.classify(str(out_path))
+                    alabel, aconf, posterior = accent_clf.classify_detailed(
+                        str(out_path)
+                    )
+                    indian_prob = posterior["indian"]
 
                 rows.append({
                     "step": step, "mode": mode, "source": src.stem, "target": t.stem,
@@ -575,6 +598,7 @@ def cmd_run(args) -> int:
                     "dur_delta_pct": round(100.0 * (dur_out - dur_src) / max(dur_src, 1e-6), 2),
                     "accent_label": alabel,
                     "accent_conf": round(aconf, 4) if aconf is not None else None,
+                    "indian_prob": round(indian_prob, 6) if indian_prob is not None else None,
                     "lufs_in": round(lufs_in, 2) if lufs_in is not None else None,
                     "avg_latency_ms": round(latency, 1) if latency is not None else None,
                     "out_path": str(out_path),
@@ -609,6 +633,7 @@ def cmd_run(args) -> int:
             "sim_cosine_mean": agg([r["sim_cosine"] for r in sub]),
             "wer_mean": agg([r["wer"] for r in sub]),
             "mos_pred_mean": agg([r["mos_pred"] for r in sub]),
+            "indian_prob_mean": agg([r["indian_prob"] for r in sub]),
             "abs_dur_delta_pct_mean": agg([abs(r["dur_delta_pct"]) for r in sub]),
             "avg_latency_ms": agg([r["avg_latency_ms"] for r in sub]),
         })

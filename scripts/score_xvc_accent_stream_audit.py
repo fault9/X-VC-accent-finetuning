@@ -122,6 +122,7 @@ def _summarize(label: str, rows: List[dict]) -> dict:
         "indian_frac": _round(
             _mean(1.0 if row["accent_label"] == "indian" else 0.0 for row in rows)
         ),
+        "indian_prob_mean": _round(_mean(row["indian_prob"] for row in rows)),
         "accent_hist": " ".join(f"{k}:{v}" for k, v in labels.most_common()),
     }
 
@@ -193,7 +194,9 @@ def main(argv=None) -> int:
                 manifest_row, whisper, source_cache
             )
             hypothesis_words = norm_text(whisper.transcribe(str(wav_path)))
-            accent_label, accent_conf = classifier.classify(str(wav_path))
+            accent_label, accent_conf, accent_posterior = classifier.classify_detailed(
+                str(wav_path)
+            )
             wav, sample_rate = sf.read(str(wav_path), always_2d=False)
             row = {
                 "set": condition,
@@ -206,6 +209,7 @@ def main(argv=None) -> int:
                 "sim_cosine": _similarity(wav_path, sim_scorer),
                 "accent_label": accent_label,
                 "accent_conf": float(accent_conf),
+                "indian_prob": float(accent_posterior["indian"]),
                 "accent_depth": ACCENT_DEPTH.get(accent_label, 0.0),
             }
             condition_rows.append(row)
@@ -215,13 +219,14 @@ def main(argv=None) -> int:
         print(
             f"{condition:30s} n={summary['n']:>2} MOS={summary['mos_mean']} "
             f"WER={summary['wer_mean']} sim={summary['sim_mean']} "
-            f"Indian={summary['indian_frac']} ({summary['accent_hist']})"
+            f"Indian={summary['indian_frac']} p={summary['indian_prob_mean']} "
+            f"({summary['accent_hist']})"
         )
 
     out = Path(args.out)
     fields = [
         "set", "clip", "source", "split", "mos_pred", "wer", "wer_mode",
-        "sim_cosine", "accent_label", "accent_conf", "accent_depth",
+        "sim_cosine", "accent_label", "accent_conf", "indian_prob", "accent_depth",
     ]
     _write_csv(out / "per_clip.csv", rows, fields)
     _write_csv(out / "condition_summary.csv", summaries, list(summaries[0]))
@@ -233,7 +238,10 @@ def main(argv=None) -> int:
                 "config": args.config,
                 "checkpoint": args.ckpt,
                 "wer_note": "sidecar reference text where available; otherwise ASR-on-source proxy",
-                "accent_note": "classifier labels are a noisy screen and require listening",
+                "accent_note": (
+                    "indian_prob is the continuous CommonAccent posterior; hard labels "
+                    "are secondary and all selection requires listening"
+                ),
             },
             indent=2,
         ),

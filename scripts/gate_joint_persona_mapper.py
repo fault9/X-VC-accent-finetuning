@@ -16,7 +16,12 @@ def main(argv=None) -> int:
     parser.add_argument("--max-mos-drop", type=float, default=0.25)
     parser.add_argument("--max-wer-increase", type=float, default=0.05)
     parser.add_argument("--max-sim-drop", type=float, default=0.03)
-    parser.add_argument("--min-indian-gain", type=float, default=0.05)
+    parser.add_argument(
+        "--min-indian-prob-gain",
+        type=float,
+        default=0.02,
+        help="minimum paired mean gain in CommonAccent Indian posterior",
+    )
     args = parser.parse_args(argv)
 
     with Path(args.summary).open(encoding="utf-8") as handle:
@@ -38,6 +43,10 @@ def main(argv=None) -> int:
         "wer": number(candidate, "wer_mean") - number(stock, "wer_mean"),
         "sim": number(candidate, "sim_mean") - number(stock, "sim_mean"),
         "indian_frac": number(candidate, "indian_frac") - number(stock, "indian_frac"),
+        "indian_prob": (
+            number(candidate, "indian_prob_mean")
+            - number(stock, "indian_prob_mean")
+        ),
     }
     failures = []
     if deltas["mos"] < -args.max_mos_drop:
@@ -48,9 +57,10 @@ def main(argv=None) -> int:
         failures.append(
             f"target-speaker similarity delta {deltas['sim']:.4f} < {-args.max_sim_drop:.4f}"
         )
-    if deltas["indian_frac"] < args.min_indian_gain:
+    if deltas["indian_prob"] < args.min_indian_prob_gain:
         failures.append(
-            f"Indian fraction gain {deltas['indian_frac']:.4f} < {args.min_indian_gain:.4f}"
+            f"Indian posterior gain {deltas['indian_prob']:.4f} "
+            f"< {args.min_indian_prob_gain:.4f}"
         )
     result = {
         "status": "pass" if not failures else "fail",
@@ -62,10 +72,13 @@ def main(argv=None) -> int:
             "max_mos_drop": args.max_mos_drop,
             "max_wer_increase": args.max_wer_increase,
             "max_target_speaker_similarity_drop": args.max_sim_drop,
-            "min_indian_gain": args.min_indian_gain,
+            "min_indian_probability_gain": args.min_indian_prob_gain,
         },
         "failures": failures,
-        "interpretation": "Passing means accent+target-voice conversion survived on unseen source speakers; listening remains mandatory.",
+        "interpretation": (
+            "Indian posterior is the primary classifier canary; hard indian_frac "
+            "is reported but does not gate. Passing still requires blinded listening."
+        ),
     }
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)

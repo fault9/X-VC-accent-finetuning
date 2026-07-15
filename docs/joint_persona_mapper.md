@@ -202,5 +202,8 @@ if total p95 exceeds the existing 120 ms current-chunk budget.
   windows and each validation pair yields one. This increases window placement
   diversity without pretending that correlated crops are new speakers.
 - MFA annotations select comparison regions only. They never warp audio.
-- Automatic accent labels are noisy. Final selection requires matched, blinded
-  listening plus the MOS/WER/ASI-similarity gates.
+- Automatic accent labels are noisy. The gate uses the paired change in the
+  continuous CommonAccent `indian` posterior. On 20 clips, a hard-label gain
+  of 0.05 is only one argmax flip and is too brittle; `indian_frac` remains a
+  secondary diagnostic. Final selection requires matched, blinded listening
+  plus the MOS/WER/ASI-similarity gates.
