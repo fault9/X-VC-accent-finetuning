@@ -24,6 +24,7 @@ SOURCE_DIR="${SOURCE_DIR:-data/eval_sources_joint_persona_clean}"
 CONFIG="${CONFIG:-configs/xvc.yaml}"
 CHECKPOINT="${CHECKPOINT:-ckpts/xvc.pt}"
 EXP_ROOT="${EXP_ROOT:-exp/persona_mapper_comparison_asi}"
+ACCENT_CALIBRATION="${ACCENT_CALIBRATION:-exp/accent_posterior_calibration/summary.csv}"
 LOOKAHEADS="${LOOKAHEADS:-0 4}"
 STEPS="${STEPS:-3000}"
 BATCH="${BATCH:-4}"
@@ -36,7 +37,7 @@ MIN_FREE_GPU_MIB="${MIN_FREE_GPU_MIB:-12000}"
 for path in \
   "$DATASET_ROOT/manifests/train.jsonl" \
   "$DATASET_ROOT/manifests/val.jsonl" \
-  "$REFERENCE" "$CONFIG" "$CHECKPOINT"; do
+  "$REFERENCE" "$CONFIG" "$CHECKPOINT" "$ACCENT_CALIBRATION"; do
   [[ -f "$path" ]] || { echo "[error] missing required file: $path" >&2; exit 1; }
 done
 [[ -d "$SOURCE_DIR" ]] || { echo "[error] missing source dir: $SOURCE_DIR" >&2; exit 1; }
@@ -137,7 +138,8 @@ PY
 
     completed=$((completed + 1))
     if python scripts/gate_joint_persona_mapper.py \
-        --summary "$arm/eval_metrics/condition_summary.csv" --out "$arm/gate.json"; then
+        --summary "$arm/eval_metrics/condition_summary.csv" \
+        --calibration "$ACCENT_CALIBRATION" --out "$arm/gate.json"; then
       audio_gate=pass
     else
       audio_gate=fail

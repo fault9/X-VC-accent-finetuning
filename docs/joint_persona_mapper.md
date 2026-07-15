@@ -205,5 +205,8 @@ if total p95 exceeds the existing 120 ms current-chunk budget.
 - Automatic accent labels are noisy. The gate uses the paired change in the
   continuous CommonAccent `indian` posterior. On 20 clips, a hard-label gain
   of 0.05 is only one argmax flip and is too brittle; `indian_frac` remains a
-  secondary diagnostic. Final selection requires matched, blinded listening
-  plus the MOS/WER/ASI-similarity gates.
+  secondary diagnostic. The automatic canary requires closing at least 25% of
+  the measured genuine-ASI versus native posterior gap; it does not demand an
+  arbitrary absolute probability or a perfect classifier label. Final
+  selection requires matched, blinded listening plus the MOS/WER/ASI-similarity
+  gates.

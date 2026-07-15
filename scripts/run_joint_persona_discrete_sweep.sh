@@ -27,6 +27,7 @@ SOURCE_DIR="${SOURCE_DIR:-data/eval_sources_joint_persona_clean}"
 CONFIG="${CONFIG:-configs/xvc.yaml}"
 CHECKPOINT="${CHECKPOINT:-ckpts/xvc.pt}"
 EXP_ROOT="${EXP_ROOT:-exp/joint_persona_discrete_asi}"
+ACCENT_CALIBRATION="${ACCENT_CALIBRATION:-exp/accent_posterior_calibration/summary.csv}"
 LOOKAHEADS="${LOOKAHEADS:-0 4}"
 DISCRETE_WEIGHTS="${DISCRETE_WEIGHTS:-0.25 0.5}"
 CODE_TEMPERATURE="${CODE_TEMPERATURE:-0.1}"
@@ -42,7 +43,7 @@ MIN_UNSEEN_SPEAKERS="${MIN_UNSEEN_SPEAKERS:-2}"
 for required in \
   "$DATASET_ROOT/manifests/train.jsonl" \
   "$DATASET_ROOT/manifests/val.jsonl" \
-  "$REFERENCE" "$CONFIG" "$CHECKPOINT"; do
+  "$REFERENCE" "$CONFIG" "$CHECKPOINT" "$ACCENT_CALIBRATION"; do
   if [[ ! -f "$required" ]]; then
     echo "[error] missing required file: $required" >&2
     exit 1
@@ -181,6 +182,7 @@ PY
     completed=$((completed + 1))
     if python scripts/gate_joint_persona_mapper.py \
         --summary "$arm/eval_metrics/condition_summary.csv" \
+        --calibration "$ACCENT_CALIBRATION" \
         --out "$arm/gate.json"; then
       audio_gate=pass
     else

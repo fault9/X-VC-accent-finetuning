@@ -20,8 +20,12 @@ def main(argv=None) -> int:
         "--min-indian-prob-gain",
         type=float,
         default=0.02,
-        help="minimum paired mean gain in CommonAccent Indian posterior",
+        help="fallback absolute gain when --calibration is not supplied",
     )
+    parser.add_argument("--calibration", default=None)
+    parser.add_argument("--calibration-target-set", default="genuine_asi")
+    parser.add_argument("--calibration-native-set", default="native_unseen")
+    parser.add_argument("--min-accent-gap-closed", type=float, default=0.25)
     args = parser.parse_args(argv)
 
     with Path(args.summary).open(encoding="utf-8") as handle:
@@ -57,7 +61,43 @@ def main(argv=None) -> int:
         failures.append(
             f"target-speaker similarity delta {deltas['sim']:.4f} < {-args.max_sim_drop:.4f}"
         )
-    if deltas["indian_prob"] < args.min_indian_prob_gain:
+    calibration = None
+    if args.calibration:
+        with Path(args.calibration).open(encoding="utf-8") as handle:
+            calibration_rows = {row["set"]: row for row in csv.DictReader(handle)}
+        required_sets = {args.calibration_target_set, args.calibration_native_set}
+        missing_sets = required_sets - calibration_rows.keys()
+        if missing_sets:
+            raise SystemExit(
+                f"[error] calibration is missing sets: {sorted(missing_sets)}"
+            )
+        target_probability = number(
+            calibration_rows[args.calibration_target_set], "indian_prob_mean"
+        )
+        native_probability = number(
+            calibration_rows[args.calibration_native_set], "indian_prob_mean"
+        )
+        ceiling_gap = target_probability - native_probability
+        if ceiling_gap <= 0:
+            raise SystemExit(
+                "[error] genuine-target Indian posterior must exceed native calibration"
+            )
+        gap_closed = deltas["indian_prob"] / ceiling_gap
+        calibration = {
+            "path": args.calibration,
+            "target_set": args.calibration_target_set,
+            "native_set": args.calibration_native_set,
+            "target_indian_probability": target_probability,
+            "native_indian_probability": native_probability,
+            "human_gap": ceiling_gap,
+            "candidate_gap_closed": gap_closed,
+        }
+        if gap_closed < args.min_accent_gap_closed:
+            failures.append(
+                f"calibrated Indian-posterior gap closed {gap_closed:.4f} "
+                f"< {args.min_accent_gap_closed:.4f}"
+            )
+    elif deltas["indian_prob"] < args.min_indian_prob_gain:
         failures.append(
             f"Indian posterior gain {deltas['indian_prob']:.4f} "
             f"< {args.min_indian_prob_gain:.4f}"
@@ -73,7 +113,9 @@ def main(argv=None) -> int:
             "max_wer_increase": args.max_wer_increase,
             "max_target_speaker_similarity_drop": args.max_sim_drop,
             "min_indian_probability_gain": args.min_indian_prob_gain,
+            "min_calibrated_accent_gap_closed": args.min_accent_gap_closed,
         },
+        "accent_calibration": calibration,
         "failures": failures,
         "interpretation": (
             "Indian posterior is the primary classifier canary; hard indian_frac "
