@@ -6,23 +6,23 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from xvc.evaluation import (
+    check_training_prompt_overlap,
+    check_unseen_sources,
+    speaker_from_name,
+)
+
 
 CONDITIONS = {
     "stock_xvc": "Frozen X-VC with the target-persona reference; no mapper.",
     "joint_persona_mapper": "Same frozen X-VC/reference with the joint mapper.",
 }
-
-
-def speaker_from_name(path: Path) -> str:
-    match = re.match(r"([^_]+)_arctic_", path.stem)
-    return match.group(1).casefold() if match else path.stem.split("_", 1)[0].casefold()
 
 
 def main(argv=None) -> int:
@@ -75,35 +75,13 @@ def main(argv=None) -> int:
     }:
         raise SystemExit("[error] checkpoint is not a supported persona stream editor")
     seen = {str(value).casefold() for value in mapper_payload.get("source_speakers_seen", [])}
-    eval_speakers = {speaker_from_name(path) for path in source_paths}
-    overlap = seen & eval_speakers
-    if args.require_unseen_source and overlap:
-        raise SystemExit(
-            f"[error] evaluation source speakers were seen in mapper training: {sorted(overlap)}"
-        )
-    if args.require_unseen_source and len(eval_speakers) < args.min_unseen_speakers:
-        raise SystemExit(
-            f"[error] only {len(eval_speakers)} unseen evaluation speaker(s); "
-            f"require {args.min_unseen_speakers}: {sorted(eval_speakers)}"
-        )
-    prompt_overlap = []
-    if args.training_manifest:
-        train_rows = [
-            json.loads(line)
-            for line in Path(args.training_manifest).read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-        train_prompts = {str(row.get("prompt_id", "")).casefold() for row in train_rows}
-        eval_prompts = set()
-        for path in source_paths:
-            match = re.search(r"(arctic_[ab]\d{4})", path.stem, flags=re.I)
-            if match:
-                eval_prompts.add(match.group(1).casefold())
-        prompt_overlap = sorted(train_prompts & eval_prompts)
-        if prompt_overlap:
-            raise SystemExit(
-                f"[error] unseen-source evaluation overlaps training prompts: {prompt_overlap[:20]}"
-            )
+    eval_speakers, overlap = check_unseen_sources(
+        source_paths, seen,
+        require_unseen=args.require_unseen_source,
+        min_unseen_speakers=args.min_unseen_speakers,
+        seen_in="mapper training",
+    )
+    prompt_overlap = check_training_prompt_overlap(source_paths, args.training_manifest)
 
     output = Path(args.out)
     if output.exists() and any(output.rglob("*.wav")) and not args.overwrite:
