@@ -34,8 +34,12 @@ discriminator.
 
 The four short WAVs remain untouched reference stimuli. Other pristine VCTK
 utterances from `p225`, `p240`, `p273`, and `p274` provide persona-specific
-self-reconstruction targets. Each target has 150 training and 15 validation
-recordings of at least 2.4 seconds. Reference, train, validation, and evaluation
+self-reconstruction targets. Each target has 15 validation recordings and at
+least 150 clean training recordings of at least 1.8 seconds. Each persona
+receives at least 12 training minutes; the exact count varies because selection
+is duration-gated. Utterances shorter than X-VC's 2.4-second training window are
+zero-padded by the upstream dataloader; evaluation sources remain at least 2.4
+seconds. Reference, train, validation, and evaluation
 prompts are disjoint. The combined archive is only a storage convenience; the
 runner uses `manifests/by_persona/<persona>/` and never mixes target voices.
 
@@ -47,6 +51,7 @@ python scripts/build_vctk_naturalness_dataset.py \
   --vctk-root /path/to/VCTK-Corpus-0.92 \
   --out data/vctk_naturalness_4voice \
   --path-prefix data/vctk_naturalness_4voice \
+  --train-minutes 12 \
   --overwrite
 ```
 

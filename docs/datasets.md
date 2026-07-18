@@ -12,9 +12,12 @@ The combined directory is a portable storage bundle only. Training reads
 `manifests/by_persona/<persona>/{train,val}.jsonl`, so an adapter never sees
 another persona's recordings.
 
-Each persona has 150 training and 15 validation utterances from the same VCTK
-speaker as its reference. Audio is pristine mono 16 kHz PCM16 WAV and at least
-2.4 seconds long. The exact 10-second reference clips are conditioning inputs,
+Each persona has 15 validation utterances and at least 150 training utterances
+from the same VCTK speaker as its reference. Selection continues until it also
+reaches at least 12 training minutes. Audio is pristine mono 16 kHz PCM16 WAV
+and at least 1.8 seconds long. Shorter-than-window training clips are zero-padded
+to X-VC's 2.4-second window; evaluation clips remain at least 2.4 seconds. The
+exact 10-second reference clips are conditioning inputs,
 not reconstruction targets. Reference, train, validation, and evaluation
 prompts are disjoint.
 
@@ -26,11 +29,12 @@ python scripts/build_vctk_naturalness_dataset.py \
   --vctk-root /path/to/VCTK-Corpus-0.92 \
   --out data/vctk_naturalness_4voice \
   --path-prefix data/vctk_naturalness_4voice \
+  --train-minutes 12 \
   --overwrite
 
 python scripts/validate_crosspairs.py \
   --data-root data/vctk_naturalness_4voice \
-  --min-duration 2.4
+  --min-duration 1.8
 ```
 
 The builder also creates:

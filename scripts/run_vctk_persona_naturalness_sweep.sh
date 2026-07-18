@@ -117,7 +117,7 @@ if pgrep -af 'torchrun|deepspeed|bins.train|eval_checkpoints'; then
   exit 1
 fi
 nvidia-smi
-python scripts/validate_crosspairs.py --data-root "$data_root" --min-duration 2.4
+python scripts/validate_crosspairs.py --data-root "$data_root" --min-duration 1.8
 
 status_file="$exp_root/status.tsv"
 if [[ ! -f "$status_file" ]]; then

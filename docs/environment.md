@@ -49,7 +49,7 @@ cached.
 ```bash
 python scripts/validate_crosspairs.py \
   --data-root data/vctk_naturalness_4voice \
-  --min-duration 2.4
+  --min-duration 1.8
 
 SMOKE=1 bash scripts/run_vctk_persona_naturalness_sweep.sh
 ```

@@ -103,6 +103,37 @@ def _duration_seconds(path: Path) -> float:
     return float(sf.info(path).duration)
 
 
+def choose_training_prompts(
+    files: dict[str, Path],
+    forbidden: set[str],
+    *,
+    speaker: str,
+    seed: int,
+    minimum_prompts: int,
+    minimum_minutes: float,
+) -> list[str]:
+    """Select a deterministic per-speaker corpus that clears both data floors."""
+    available = sorted(
+        set(files) - forbidden,
+        key=lambda prompt: _stable_score(f"{speaker}:{prompt}", seed),
+    )
+    selected: list[str] = []
+    seconds = 0.0
+    target_seconds = minimum_minutes * 60.0
+    for prompt in available:
+        selected.append(prompt)
+        seconds += _duration_seconds(files[prompt])
+        if len(selected) >= minimum_prompts and seconds >= target_seconds:
+            break
+    if len(selected) < minimum_prompts or seconds < target_seconds:
+        raise ValueError(
+            f"insufficient eligible training audio for {speaker}: "
+            f"{len(selected)} prompts / {seconds / 60.0:.3f} minutes; need at "
+            f"least {minimum_prompts} prompts / {minimum_minutes:.3f} minutes"
+        )
+    return sorted(selected)
+
+
 def choose_prompt_splits(
     target_files: dict[str, dict[str, Path]],
     reference_prompts: set[str],
@@ -188,7 +219,7 @@ def build(args: argparse.Namespace) -> dict:
     eval_files = {
         speaker: {
             prompt: path for prompt, path in files.items()
-            if _duration_seconds(path) >= args.min_utterance_duration
+            if _duration_seconds(path) >= args.min_eval_duration
         }
         for speaker, files in eval_files.items()
     }
@@ -208,16 +239,14 @@ def build(args: argparse.Namespace) -> dict:
     train_ids: dict[str, list[str]] = {}
     train_forbidden = reference_prompts | set(val_ids) | set(eval_ids)
     for speaker, files in target_files.items():
-        available = sorted(
-            set(files) - train_forbidden,
-            key=lambda prompt: _stable_score(f"{speaker}:{prompt}", args.seed),
+        train_ids[speaker] = choose_training_prompts(
+            files,
+            train_forbidden,
+            speaker=speaker,
+            seed=args.seed,
+            minimum_prompts=args.train_prompts,
+            minimum_minutes=args.train_minutes,
         )
-        if len(available) < args.train_prompts:
-            raise ValueError(
-                f"need {args.train_prompts} eligible training prompts for {speaker}, "
-                f"found {len(available)}"
-            )
-        train_ids[speaker] = sorted(available[: args.train_prompts])
     splits = {"train": train_ids, "val": val_ids, "eval": eval_ids}
 
     if output.exists() and args.overwrite:
@@ -375,7 +404,12 @@ def build(args: argparse.Namespace) -> dict:
         "reference_policy": "exact 10-second stimuli; conditioning only; excluded from train/val targets",
         "training_policy": "real target-speaker self-pairs; pristine; no warp/alignment/generated audio",
         "sample_rate": 16_000,
-        "minimum_utterance_duration": args.min_utterance_duration,
+        "minimum_training_utterance_duration": args.min_utterance_duration,
+        "minimum_evaluation_utterance_duration": args.min_eval_duration,
+        "training_window_seconds": 2.4,
+        "short_training_utterance_policy": "zero-pad to the 2.4-second X-VC window",
+        "minimum_training_minutes_per_persona": args.train_minutes,
+        "minimum_training_prompts_per_persona": args.train_prompts,
         "prompt_disjoint": True,
         "reference_prompts_excluded": sorted(reference_prompts),
         "prompt_splits": splits,
@@ -415,11 +449,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="data/vctk_naturalness_4voice")
     parser.add_argument("--path-prefix", default=None,
                         help="manifest path prefix on the training machine; default: --out")
-    parser.add_argument("--train-prompts", type=int, default=150)
+    parser.add_argument(
+        "--train-prompts", type=int, default=150,
+        help="minimum number of training recordings per persona (default: 150)",
+    )
+    parser.add_argument(
+        "--train-minutes", type=float, default=12.0,
+        help="minimum accumulated training duration per persona (default: 12)",
+    )
     parser.add_argument("--val-prompts", type=int, default=15)
     parser.add_argument("--eval-prompts", type=int, default=6)
-    parser.add_argument("--min-utterance-duration", type=float, default=2.4,
-                        help="exclude clips shorter than X-VC's training window")
+    parser.add_argument(
+        "--min-utterance-duration", type=float, default=1.8,
+        help="minimum clean training speech duration; clips below X-VC's "
+             "2.4-second window are zero-padded by the upstream dataloader",
+    )
+    parser.add_argument(
+        "--min-eval-duration", type=float, default=2.4,
+        help="minimum unseen-source evaluation duration (default: 2.4)",
+    )
     parser.add_argument("--eval-speakers", default="p226,p228,p232,p237,p245")
     parser.add_argument("--seed", type=int, default=20260718)
     parser.add_argument("--overwrite", action="store_true")

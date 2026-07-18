@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from scripts.build_vctk_naturalness_dataset import choose_prompt_splits
+import scripts.build_vctk_naturalness_dataset as builder
+from scripts.build_vctk_naturalness_dataset import (
+    choose_prompt_splits,
+    choose_training_prompts,
+)
 
 
 def test_prompt_splits_are_balanced_disjoint_and_deterministic():
@@ -35,3 +39,21 @@ def test_prompt_splits_use_only_common_prompts():
         files, set(), train_prompts=1, val_prompts=1, eval_prompts=0, seed=3,
     )
     assert set(result["train"] + result["val"]) == {"002", "003"}
+
+
+def test_training_selection_clears_prompt_and_duration_floors(monkeypatch):
+    files = {
+        f"{index:03d}": Path(f"p240_{index:03d}.flac")
+        for index in range(1, 11)
+    }
+    monkeypatch.setattr(builder, "_duration_seconds", lambda _: 60.0)
+    selected = choose_training_prompts(
+        files,
+        {"001"},
+        speaker="p240",
+        seed=7,
+        minimum_prompts=2,
+        minimum_minutes=4.0,
+    )
+    assert len(selected) == 4
+    assert "001" not in selected
