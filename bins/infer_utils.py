@@ -1,7 +1,7 @@
 import hashlib
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -16,12 +16,12 @@ def _to_device(device_id: int) -> torch.device:
     return torch.device("cpu")
 
 
-def _sha256_file(path: str, chunk: int = 1 << 20) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(chunk), b""):
-            h.update(block)
-    return h.hexdigest()
+def _sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as checkpoint:
+        for block in iter(lambda: checkpoint.read(chunk_size), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def load_xvc(config_path: str, ckpt_path: str, device_id: int, ema_load: bool):
@@ -29,8 +29,6 @@ def load_xvc(config_path: str, ckpt_path: str, device_id: int, ema_load: bool):
     if "config" in cfg:
         cfg = cfg["config"]
 
-    # Identify EXACTLY which weights are being served/evaluated — checkpoint
-    # provenance is part of every result produced downstream.
     print(f"[x-vc] checkpoint: {ckpt_path} sha256={_sha256_file(ckpt_path)}")
 
     args = {
@@ -53,11 +51,12 @@ def load_pair_as_tensors(
 ):
     source_wav_np = process_audio(source_wav_path, cfg, latent_hop_length)
     target_wav_np = process_audio(target_wav_path, cfg, latent_hop_length)
-    if cfg.get("reference_duration") is not None:
-        reference_samples = int(float(cfg["reference_duration"]) * int(cfg["sample_rate"]))
+    reference_duration = cfg.get("reference_duration")
+    if reference_duration is not None:
+        reference_samples = int(float(reference_duration) * int(cfg["sample_rate"]))
         if len(target_wav_np) < reference_samples:
             raise ValueError(
-                f"target reference must be at least {float(cfg['reference_duration']):.2f}s"
+                f"target reference must be at least {float(reference_duration):.2f}s"
             )
         target_wav_np = target_wav_np[:reference_samples]
 
@@ -102,83 +101,34 @@ def run_offline(model, source_wav: torch.Tensor, target_wav: torch.Tensor, targe
 
 
 @torch.inference_mode()
-def extract_source_streams(model, source_wav: torch.Tensor) -> Dict[str, torch.Tensor]:
-    """Encode one source window into X-VC's two synchronized 50 Hz streams."""
-    semantic_encoder = _required(model.semantic_encoder, "semantic_encoder")
-    semantic_adapter = _required(model.semantic_adapter, "semantic_adapter")
-    acoustic_encoder = _required(model.acoustic_encoder, "acoustic_encoder")
-    acoustic_quantizer = _required(model.acoustic_quantizer, "acoustic_quantizer")
-
-    feat = semantic_encoder.extract_and_encode(source_wav.squeeze(1))["speech_tokens"]
-    semantic = semantic_encoder.embed_ids(feat)
-    semantic = semantic_adapter(semantic.transpose(1, 2)).transpose(1, 2)
-
-    acoustic_latent = acoustic_encoder(source_wav)
-    quantized = acoustic_quantizer(acoustic_latent)
-    acoustic_zq, acoustic_indices = quantized[0], quantized[1]
-
-    # Encoder edge behaviour can differ by one frame. Only a shared timeline is
-    # valid for concatenation or persona editing.
-    frames = min(semantic.shape[1], acoustic_zq.shape[-1], acoustic_indices.shape[-1])
-    return {
-        "semantic": semantic[:, :frames],
-        "acoustic_zq": acoustic_zq[:, :, :frames],
-        "acoustic_indices": acoustic_indices[:, :frames],
-    }
-
-
-@torch.inference_mode()
-def render_source_streams(
-    model,
-    streams: Dict[str, torch.Tensor],
-    speaker_condition: torch.Tensor,
-    frame_condition: torch.Tensor,
-    stream_editor: Optional[Any] = None,
-    stream_window: Optional[Dict[str, int]] = None,
-):
-    acoustic_quantizer = _required(model.acoustic_quantizer, "acoustic_quantizer")
-    prenet = _required(model.prenet, "prenet")
-    acoustic_converter = _required(model.acoustic_converter, "acoustic_converter")
-    acoustic_decoder = _required(model.acoustic_decoder, "acoustic_decoder")
-
-    sem_emb = streams["semantic"]
-    zq = streams["acoustic_zq"]
-    indices = streams["acoustic_indices"]
-    if stream_editor is not None:
-        if stream_window is not None:
-            stream_editor.validate_stream_window(**stream_window)
-        sem_emb, zq = stream_editor.edit_pre_prenet(
-            sem_emb, zq, indices, acoustic_quantizer
-        )
-    acu_emb = zq.transpose(1, 2)
-
-    combined_emb = torch.cat([sem_emb, acu_emb], dim=2)
-    x = prenet(combined_emb.transpose(1, 2), speaker_condition)
-    if stream_editor is not None:
-        x = stream_editor.edit_post_prenet(x)
-    x = acoustic_converter(x, frame_condition, speaker_condition)
-    y = acoustic_decoder(x)
-    return y
-
-
-@torch.inference_mode()
 def run_stream_chunk_forward(
     model,
     source_wav: torch.Tensor,
     speaker_condition: torch.Tensor,
     frame_condition: torch.Tensor,
-    stream_editor: Optional[Any] = None,
-    stream_window: Optional[Dict[str, int]] = None,
 ):
-    streams = extract_source_streams(model, source_wav)
-    return render_source_streams(
-        model,
-        streams,
-        speaker_condition,
-        frame_condition,
-        stream_editor=stream_editor,
-        stream_window=stream_window,
-    )
+    semantic_encoder = _required(model.semantic_encoder, "semantic_encoder")
+    semantic_adapter = _required(model.semantic_adapter, "semantic_adapter")
+    acoustic_encoder = _required(model.acoustic_encoder, "acoustic_encoder")
+    acoustic_quantizer = _required(model.acoustic_quantizer, "acoustic_quantizer")
+    prenet = _required(model.prenet, "prenet")
+    acoustic_converter = _required(model.acoustic_converter, "acoustic_converter")
+    acoustic_decoder = _required(model.acoustic_decoder, "acoustic_decoder")
+
+    feat = semantic_encoder.extract_and_encode(source_wav.squeeze(1))["speech_tokens"]
+    sem_emb = semantic_encoder.embed_ids(feat)
+    sem_emb = semantic_adapter(sem_emb.transpose(1, 2)).transpose(1, 2)
+
+    z = acoustic_encoder(source_wav)
+    aq_outputs = acoustic_quantizer(z)
+    zq = aq_outputs[0]
+    acu_emb = zq.transpose(1, 2)
+
+    combined_emb = torch.cat([sem_emb, acu_emb], dim=2)
+    x = prenet(combined_emb.transpose(1, 2), speaker_condition)
+    x = acoustic_converter(x, frame_condition, speaker_condition)
+    y = acoustic_decoder(x)
+    return y
 
 
 @torch.inference_mode()
@@ -192,7 +142,6 @@ def run_streaming(
     current_ms: int,
     future_ms: int,
     smooth_ms: int,
-    stream_editor: Optional[Any] = None,
 ):
     if current_ms <= 0:
         raise ValueError("`current_ms` must be > 0 for streaming mode.")
@@ -201,13 +150,6 @@ def run_streaming(
     history_ms = chunk_ms - current_ms - smooth_ms - future_ms
     if history_ms < 0:
         raise ValueError("Invalid streaming window: chunk_ms - current_ms - smooth_ms - future_ms must be >= 0.")
-    stream_window = {
-        "history_ms": history_ms,
-        "smooth_ms": smooth_ms,
-        "future_ms": future_ms,
-    }
-    if stream_editor is not None:
-        stream_editor.validate_stream_window(**stream_window)
 
     overlap_len = smooth_ms * sample_rate // 1000
     if overlap_len > 0:
@@ -236,14 +178,7 @@ def run_streaming(
         chunk_wav = source_wav[:, :, start_len + left_pad : end_len - right_pad]
         chunk_wav = F.pad(chunk_wav, (left_pad, right_pad), mode="constant", value=0)
 
-        chunk_out = run_stream_chunk_forward(
-            model,
-            chunk_wav,
-            speaker_condition,
-            frame_condition,
-            stream_editor=stream_editor,
-            stream_window=stream_window,
-        )
+        chunk_out = run_stream_chunk_forward(model, chunk_wav, speaker_condition, frame_condition)
         cur_start = history_ms * sample_rate // 1000
         cur_end = (history_ms + current_ms) * sample_rate // 1000
         chunk_recon_wav = chunk_out[:, :, cur_start:cur_end]

@@ -1,144 +1,50 @@
-# Maintained Hindi/ASI datasets
+# VCTK persona-naturalness dataset
 
-## Canonical pristine parallel dataset
+The maintained dataset is `data/vctk_naturalness_4voice`. It contains one
+independent self-reconstruction corpus for each fixed target persona:
 
-The maintained training/audit dataset is
-`data/hindi_asi_pristine_parallel_221`:
+- `female_high_p240_10s`
+- `female_low_p225_10s`
+- `male_high_p273_10s`
+- `male_low_p274_10s`
 
-- 200 train and 21 validation prompt-matched native-to-ASI pairs;
-- pristine mono 16 kHz recordings;
-- prompt-disjoint train/validation splits;
-- genuine source and target MFA phone TextGrids;
-- copied files with SHA256 checksums, not symlinks; and
-- natural source and target durations (the pairs are not frame-synchronous).
+The combined directory is a portable storage bundle only. Training reads
+`manifests/by_persona/<persona>/{train,val}.jsonl`, so an adapter never sees
+another persona's recordings.
 
-The source and target say the same sentence, but neither waveform nor latent
-features are warped. MFA is retained only as interval metadata for phone-local
-monotonic objectives.
+Each persona has 150 training and 15 validation utterances from the same VCTK
+speaker as its reference. Audio is pristine mono 16 kHz PCM16 WAV and at least
+2.4 seconds long. The exact 10-second reference clips are conditioning inputs,
+not reconstruction targets. Reference, train, validation, and evaluation
+prompts are disjoint.
 
-Build it where the prepared MFA corpus and alignments coexist:
+Build the dataset on the machine holding VCTK-Corpus-0.92:
 
 ```bash
-python scripts/build_pristine_parallel_dataset.py \
-  --prepared-root data/mfa_hindi_phoneaware_asi \
-  --out data/hindi_asi_pristine_parallel_221 \
-  --path-prefix data/hindi_asi_pristine_parallel_221 \
-  --target-speaker ASI \
-  --min-duration 2.6
+python scripts/build_vctk_naturalness_dataset.py \
+  --references-dir ../vctk_target_references_10s_natural_f0_authority \
+  --vctk-root /path/to/VCTK-Corpus-0.92 \
+  --out data/vctk_naturalness_4voice \
+  --path-prefix data/vctk_naturalness_4voice \
+  --overwrite
 
 python scripts/validate_crosspairs.py \
-  --data-root data/hindi_asi_pristine_parallel_221 \
-  --min-duration 2.6
+  --data-root data/vctk_naturalness_4voice \
+  --min-duration 2.4
 ```
 
-`dataset_meta.json` records `not_frame_synchronous: true`. The validator then
-checks source and target durations independently while still enforcing audio
-format, prompt isolation, checksums, clipping, DC offset, silence, and path
-integrity.
+The builder also creates:
 
-Transfer the complete dataset to the GPU container as a local archive:
+- `eval_sources_scout/`: two held-out clips from each of five unseen speakers;
+- `eval_sources/`: the full 30-source confirmation set;
+- `eval_targets/`: the four fixed references; and
+- `evaluation_plans/<persona>.json`: one-target assignments for each adapter.
+
+Archive transfer artifact:
 
 ```bash
-tar -czf data/hindi_asi_pristine_parallel_221.tgz \
-  -C data hindi_asi_pristine_parallel_221
+tar -czf data/vctk_naturalness_4voice.tgz \
+  -C data vctk_naturalness_4voice
 ```
 
-Dataset directories and `*.tgz` archives are ignored by git.
-
-## Manifest contract
-
-Each `manifests/{train,val}.jsonl` row identifies the source and ASI recording,
-utterance ids, prompt id, transcripts, alignment TextGrids, and checksums. The
-schema and validation implementation live in:
-
-- `xvc/data/schemas.py`
-- `xvc/data/validation.py`
-- `scripts/validate_crosspairs.py`
-
-Do not feed these natural-duration pairs into direct frame-wise waveform
-regression. They are intended for stream localization and alignment-aware
-phone/token objectives.
-
-## Derived feature shards
-
-`scripts/extract_joint_persona_pairs.py` encodes the canonical recordings with
-the frozen stock checkpoint and writes small `.pt` shards under
-`data/joint_persona_pairs_asi/{train,val}`. A shard is only a storage bundle of
-several examples; it does not change the data or training method. Shards are
-derived cache and can be regenerated.
-
-## Evaluation assets
-
-The maintained sweep expects:
-
-- `data/eval_targets/ASI.wav`: the pinned target-persona reference;
-- `data/eval_sources_joint_persona_clean/*.wav`: at least ten evaluation
-  sources from at least two speakers absent from mapper training; and
-- no prompt overlap with the training manifest.
-
-The mapper receives no source-speaker id. The unseen-speaker evaluation is
-what tests the claim that any source can be converted to the target persona.
-
-## Scale-up dataset for the post-prenet experiment
-
-The 221-pair dataset is a valid pilot set, not the final data-scale test: after
-phone/context gates it produced 178 unique rows and only BDL/RMS native
-sources. The scale-up runner fails closed unless its dataset has:
-
-- at least 600 training pairs;
-- at least four diverse native training speakers;
-- at least 45 minutes of **unique** real ASI target recordings (pair repeats
-  do not increase this number); and
-- prompt-disjoint evaluation speakers absent from training.
-
-Build the larger input directly from pristine L1/L2-ARCTIC WAVs with
-`select_pristine_persona_pairs.py`. It uses each ASI utterance once by default
-and rotates source speakers across prompts. Then run
-`prepare_phoneaware_mfa_corpus.py`, the metadata-only MFA queue, and
-`build_pristine_parallel_dataset.py`. Do not satisfy the gate by pairing one
-ASI utterance with several native speakers: the unique-ASI-minutes check is
-specifically intended to catch that.
-
-For example, on WSL (adjust the four source globs to the local L1-ARCTIC
-layout and the target glob to the pristine ASI directory):
-
-```bash
-python scripts/select_pristine_persona_pairs.py \
-  --source 'bdl=/path/to/L1-ARCTIC/**/bdl/**/*.wav' \
-  --source 'rms=/path/to/L1-ARCTIC/**/rms/**/*.wav' \
-  --source 'clb=/path/to/L1-ARCTIC/**/clb/**/*.wav' \
-  --source 'slt=/path/to/L1-ARCTIC/**/slt/**/*.wav' \
-  --target-glob '/path/to/L2-ARCTIC/ASI/**/*.wav' \
-  --target-speaker ASI \
-  --val-prompts 50 \
-  --out data/hindi_asi_scaleup_selection
-
-python scripts/prepare_phoneaware_mfa_corpus.py \
-  --train-manifest data/hindi_asi_scaleup_selection/train.jsonl \
-  --val-manifest data/hindi_asi_scaleup_selection/val.jsonl \
-  --prompts-file /path/to/L2-ARCTIC/PROMPTS \
-  --target-speaker ASI \
-  --out data/mfa_hindi_phoneaware_asi_scaleup
-
-MFA_ROOT=data/mfa_hindi_phoneaware_asi_scaleup \
-MFA_DICTIONARY=english_us_mfa \
-MFA_ACOUSTIC_MODEL=english_mfa \
-MFA_NUM_JOBS=4 \
-bash scripts/run_phoneaware_mfa_queue.sh
-
-python scripts/build_pristine_parallel_dataset.py \
-  --prepared-root data/mfa_hindi_phoneaware_asi_scaleup \
-  --out data/hindi_asi_pristine_parallel_scaleup \
-  --path-prefix data/hindi_asi_pristine_parallel_scaleup \
-  --target-speaker ASI \
-  --min-duration 2.6
-```
-
-Inspect the preparation metadata before MFA. If it contains under 45 unique
-minutes of ASI, return to the raw L2-ARCTIC corpus and select more shared
-prompts; do not compensate with synthetic L10 audio or repeated pairs.
-
-The recommended training sources are BDL, RMS, CLB, and SLT. Evaluation must
-then move to different speakers, for example ABA, MBMPS, and SVBI, with no
-training-prompt overlap. `scripts/check_persona_dataset_scale.py` verifies all
-of these conditions before encoding or training starts.
+Datasets, archives, checkpoints, and evaluation outputs are ignored by git.

@@ -308,8 +308,8 @@ def init_models(args, config):
 
     # load checkpoint from pre-trained model
     elif args.checkpoint is not None:
-        # Require the fine-tuned modules to load in full: a warm start that silently
-        # dropped prenet/acoustic_converter would train them from random init.
+        # Require every selected adapter host to load in full: silently dropping
+        # one would train its base weights from random initialization.
         require_modules_by_model = {
             k: list(config.model[k]["trainable_modules"])
             for k in config.model

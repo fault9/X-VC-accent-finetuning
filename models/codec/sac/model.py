@@ -125,19 +125,19 @@ class XVC(nn.Module):
             mel_extractor=mel_extractor,
         )
 
-        # LoRA: if the training config enabled adapters, recreate the SAME adapter
-        # topology BEFORE loading so the checkpoint's lora_A/lora_B keys match by
-        # name. For a stock checkpoint loaded under a LoRA config (the eval baseline),
-        # the adapters stay at their zero-init no-op and the model reproduces stock
-        # output -- so base-vs-adapter is a clean comparison on one config.
+        # A stock checkpoint loaded with a LoRA config keeps the zero-initialized
+        # adapters as an exact no-op baseline. Adapted checkpoints then load into
+        # the same model structure for a fair comparison.
         lora_cfg = gen_cfg.get("lora", None) if hasattr(gen_cfg, "get") else None
         if lora_cfg and lora_cfg.get("enabled", False):
             from models.codec.sac.modules.lora import inject_lora_into_generator
+
             info = inject_lora_into_generator(
                 model, lora_cfg, gen_cfg.get("trainable_modules", None)
             )
             log.info(
-                "[x-vc] LoRA injected for load: %d layer(s) under %s (r=%d, %.3fM params)",
+                "[x-vc] LoRA injected for load: %d layer(s) under %s "
+                "(r=%d, %.3fM params)",
                 info["n_adapters"], info["targets"], info["r"],
                 info["n_lora_params"] / 1e6,
             )
@@ -166,122 +166,6 @@ class XVC(nn.Module):
         model.to(device).eval()
         return model
 
-    @staticmethod
-    def _sample_bct_at_normalized_positions(
-        features: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
-        """Linearly sample ``B x C x T`` features at normalized positions."""
-        if features.ndim != 3 or positions.ndim != 2:
-            raise ValueError(
-                f"expected BCT features and BT positions, got "
-                f"{features.shape} and {positions.shape}"
-            )
-        if features.shape[0] != positions.shape[0] or features.shape[-1] < 1:
-            raise ValueError("latent alignment batch/time dimensions are invalid")
-        scaled = positions.clamp(0.0, 1.0) * (features.shape[-1] - 1)
-        lower = scaled.floor().long()
-        upper = (lower + 1).clamp(max=features.shape[-1] - 1)
-        weight = (scaled - lower).unsqueeze(1).to(features.dtype)
-        gather_shape = (-1, features.shape[1], -1)
-        lo = torch.gather(features, 2, lower.unsqueeze(1).expand(*gather_shape))
-        hi = torch.gather(features, 2, upper.unsqueeze(1).expand(*gather_shape))
-        return lo + (hi - lo) * weight
-
-    @staticmethod
-    def _sample_bct_nearest(
-        features: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
-        """Nearest-frame sampling for quantized/codebook feature streams."""
-        scaled = positions.clamp(0.0, 1.0) * (features.shape[-1] - 1)
-        indices = scaled.round().long().unsqueeze(1).expand(
-            -1, features.shape[1], -1
-        )
-        return torch.gather(features, 2, indices)
-
-    def _latent_aligned_source(self, inputs: dict):
-        """Encode pristine source audio, then align both frozen source streams.
-
-        This is training-only. Each item is encoded separately at its recorded
-        natural length so batch padding can never influence WhisperVQ or SAC.
-        """
-        source = inputs["alignment_source_wav"]
-        lengths = inputs["alignment_source_length"]
-        positions = inputs["latent_alignment_positions"]
-        if source is None or lengths is None or positions is None:
-            raise RuntimeError("incomplete latent-alignment batch")
-        if not self.acoustic_encoder or not self.acoustic_quantizer:
-            raise RuntimeError("latent alignment requires acoustic encoder/quantizer")
-        if not self.semantic_adapter:
-            raise RuntimeError("x-vc requires `semantic_adapter`.")
-
-        semantic_batch = []
-        zq_batch = []
-        acoustic_batch = []
-        vq_losses = []
-        perplexities = []
-        cluster_sizes = []
-        for index in range(source.shape[0]):
-            valid_length = int(lengths[index].item())
-            if valid_length <= 0 or valid_length > source.shape[-1]:
-                raise RuntimeError("invalid pristine source length")
-            item_source = source[index:index + 1, :, :valid_length]
-            item_positions = positions[index:index + 1].to(item_source.device)
-
-            semantic_tokens = self.semantic_encoder.extract_and_encode(
-                item_source.squeeze(1)
-            )["speech_tokens"]
-            sem_emb = self.semantic_encoder.embed_ids(semantic_tokens)
-            sem_emb = self.semantic_adapter(
-                sem_emb.transpose(1, 2)
-            ).transpose(1, 2)
-
-            acoustic_encoder_out = self.acoustic_encoder(item_source)
-            aq_outputs = self.acoustic_quantizer(acoustic_encoder_out)
-            if len(aq_outputs) == 7:
-                zq_a, _, commit, codebook, _, perplexity, cluster_size = aq_outputs
-                vq_loss = (commit + codebook).mean()
-            elif len(aq_outputs) == 5:
-                zq_a, _, vq_loss, perplexity, cluster_size = aq_outputs
-                if isinstance(vq_loss, tuple):
-                    vq_loss = vq_loss[0]
-            elif len(aq_outputs) == 2:
-                zq_a, _ = aq_outputs
-                vq_loss, perplexity, cluster_size = 0, 0, 0
-            else:
-                raise RuntimeError("Unexpected acoustic_quantizer output format.")
-
-            item_positions = item_positions.to(dtype=sem_emb.dtype)
-            semantic_batch.append(
-                self._sample_bct_at_normalized_positions(
-                    sem_emb.transpose(1, 2), item_positions
-                ).transpose(1, 2)
-            )
-            zq_batch.append(self._sample_bct_nearest(zq_a, item_positions))
-            acoustic_batch.append(
-                self._sample_bct_at_normalized_positions(
-                    acoustic_encoder_out, item_positions
-                )
-            )
-            vq_losses.append(vq_loss)
-            perplexities.append(perplexity)
-            cluster_sizes.append(cluster_size)
-
-        def mean_metric(values):
-            if not torch.is_tensor(values[0]):
-                return sum(values) / len(values)
-            return torch.stack(values, dim=0).mean(dim=0)
-
-        sem_emb = torch.cat(semantic_batch, dim=0)
-        zq_a = torch.cat(zq_batch, dim=0)
-        acoustic_encoder_out = torch.cat(acoustic_batch, dim=0)
-        vq_loss = mean_metric(vq_losses)
-        a_perplexity = mean_metric(perplexities)
-        a_cluster_size = mean_metric(cluster_sizes)
-        return (
-            sem_emb, zq_a, acoustic_encoder_out,
-            vq_loss, a_perplexity, a_cluster_size,
-        )
-
     def forward(self, inputs: dict):
         """
         Forward pass of x-vc.
@@ -289,19 +173,15 @@ class XVC(nn.Module):
         semantic_tokens = inputs.get("semantic_tokens", None)
         source_wav = inputs["source_wav"]
         target_wav = inputs["target_wav"]
-        target_reference_wav = inputs.get("target_reference_wav", None)
+        target_reference_wav = inputs.get("target_reference_wav")
         target_wav_cond = inputs.get("target_wav_cond", target_wav)
         ssl_feat = inputs.get("ssl_feat", None)
-        latent_alignment = inputs.get("latent_alignment_positions", None) is not None
 
         # Note: online feature extraction is not supported yet.
         feat = semantic_tokens
 
         if feat is None:
-            if not latent_alignment:
-                feat = self.semantic_encoder.extract_and_encode(
-                    source_wav.squeeze(1)
-                )["speech_tokens"]
+            feat = self.semantic_encoder.extract_and_encode(source_wav.squeeze(1))["speech_tokens"]
             ssl_feat = self.semantic_encoder.extract_and_encode(target_wav.squeeze(1))["whisper_hidden_states_50hz"]
 
         # xvc simplified condition path:
@@ -321,41 +201,34 @@ class XVC(nn.Module):
 
         frame_condition = self.mel_extractor(target_wav_cond)
 
-        if latent_alignment:
-            (
-                sem_emb, zq_a, acoustic_encoder_out,
-                vq_loss, a_perplexity, a_cluster_size,
-            ) = self._latent_aligned_source(inputs)
-            a_indices = None
+        sem_emb = self.semantic_encoder.embed_ids(feat)  # B x T_s x D_s
+
+        if self.semantic_adapter:
+            sem_emb = self.semantic_adapter(sem_emb.transpose(1, 2)).transpose(1, 2)
         else:
-            sem_emb = self.semantic_encoder.embed_ids(feat)  # B x T_s x D_s
+            raise RuntimeError("x-vc requires `semantic_adapter`.")
 
-            if self.semantic_adapter:
-                sem_emb = self.semantic_adapter(sem_emb.transpose(1, 2)).transpose(1, 2)
-            else:
-                raise RuntimeError("x-vc requires `semantic_adapter`.")
+        if self.acoustic_encoder:
+            acoustic_encoder_out = self.acoustic_encoder(source_wav)   # B x 1 x T_a -> B x D_a x T_a
+        else:
+            raise RuntimeError("x-vc requires `acoustic_encoder`.")
 
-            if self.acoustic_encoder:
-                acoustic_encoder_out = self.acoustic_encoder(source_wav)
+        if self.acoustic_quantizer:
+            aq_outputs = self.acoustic_quantizer(acoustic_encoder_out)
+            if len(aq_outputs) == 7:
+                zq_a, a_indices, a_commit_loss, a_codebook_loss, _, a_perplexity, a_cluster_size = aq_outputs
+                vq_loss = (a_commit_loss + a_codebook_loss).mean()
+            elif len(aq_outputs) == 5:
+                zq_a, a_indices, vq_loss, a_perplexity, a_cluster_size = aq_outputs
+                if isinstance(vq_loss, tuple):
+                    vq_loss = vq_loss[0]
+            elif len(aq_outputs) == 2:
+                zq_a, a_indices = aq_outputs
+                vq_loss, a_perplexity, a_cluster_size = 0.0, 0.0, 0
             else:
-                raise RuntimeError("x-vc requires `acoustic_encoder`.")
-
-            if self.acoustic_quantizer:
-                aq_outputs = self.acoustic_quantizer(acoustic_encoder_out)
-                if len(aq_outputs) == 7:
-                    zq_a, a_indices, a_commit_loss, a_codebook_loss, _, a_perplexity, a_cluster_size = aq_outputs
-                    vq_loss = (a_commit_loss + a_codebook_loss).mean()
-                elif len(aq_outputs) == 5:
-                    zq_a, a_indices, vq_loss, a_perplexity, a_cluster_size = aq_outputs
-                    if isinstance(vq_loss, tuple):
-                        vq_loss = vq_loss[0]
-                elif len(aq_outputs) == 2:
-                    zq_a, a_indices = aq_outputs
-                    vq_loss, a_perplexity, a_cluster_size = 0.0, 0.0, 0
-                else:
-                    raise RuntimeError("Unexpected acoustic_quantizer output format.")
-            else:
-                raise RuntimeError("x-vc requires `acoustic_quantizer`.")
+                raise RuntimeError("Unexpected acoustic_quantizer output format.")
+        else:
+            raise RuntimeError("x-vc requires `acoustic_quantizer`.")
 
         acu_emb = zq_a.transpose(1, 2)  # B x T_a x D_a
         combined_emb = torch.cat([sem_emb, acu_emb], dim=2)  # B x T x (D_s + D_a)
@@ -409,7 +282,7 @@ class XVC(nn.Module):
         semantic_tokens = inputs.get("semantic_tokens", None)
         source_wav = inputs["source_wav"]
         target_wav = inputs["target_wav"]
-        target_reference_wav = inputs.get("target_reference_wav", None)
+        target_reference_wav = inputs.get("target_reference_wav")
         target_wav_cond = inputs.get("target_wav_cond", target_wav)
         ssl_feat = inputs.get("ssl_feat", None)
 

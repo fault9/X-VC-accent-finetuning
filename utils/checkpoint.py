@@ -83,7 +83,7 @@ def _report_and_gate_load(
       * `unexpected_keys` (weights in the checkpoint with no home in the model) ->
         an architecture / config mismatch; fail unless `strict_unexpected=False`.
       * `missing_keys` that fall inside a `require_modules` prefix (the modules we
-        actually fine-tune -- prenet / acoustic_converter) -> those weights MUST
+        actually fine-tune) -> those weights MUST
         come from the warm-start checkpoint, so a miss there means training from
         random init exactly where it matters. Fail.
 
@@ -299,4 +299,3 @@ def strip_prefix(state_dict, prefix: str):
         else:
             out[k] = v
     return out
-

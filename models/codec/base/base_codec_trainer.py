@@ -151,7 +151,7 @@ class BaseCodecTrainer(BaseTranier):
         is set (fine-tuning), every generator submodule whose parameters are all
         frozen is also forced to eval(), so modules with running statistics -- e.g.
         the ERes2Net BatchNorm inside `speaker_encoder` -- do not drift while only
-        `acoustic_converter` and `prenet` are trained. `.module` unwraps the
+        selected adapter hosts are trained. `.module` unwraps the
         DeepSpeed/DDP wrapper when present.
         """
         [model.train() for _, model in models.items()]

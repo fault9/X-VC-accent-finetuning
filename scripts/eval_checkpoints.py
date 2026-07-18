@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Per-checkpoint conversion eval for X-VC accent fine-tunes — THE checkpoint selector.
+Per-checkpoint evaluation for persona-specific X-VC naturalness adapters.
 
 Deployment converts UNSEEN sources (the experimenter live, participants) into the
 fine-tuned targets, so checkpoints must be chosen from that direction — not from
@@ -10,7 +10,7 @@ self-reconstruction validation loss. For every checkpoint of a run this script:
        explicit evaluation plan (offline mode; optionally streaming too),
     2. computes per clip: ERes2Net cosine similarity to the target reference,
        Whisper WER against the script text (or an ASR-on-source proxy),
-       output-vs-source duration delta, optional CommonAccent confidence,
+       output-vs-source duration delta and streaming latency,
     3. dumps audible samples per checkpoint (optionally EBU-R128 loudness
        normalized and/or resampled, e.g. 24 kHz for PP delivery),
     4. writes metrics.csv (per clip) + summary.csv (per checkpoint) and prints a
@@ -39,10 +39,9 @@ Whisper's transcript of the SOURCE clip (intelligibility-drift proxy; flagged in
 the ``wer_mode`` column).
 
 Requires torch + the repo deps; Whisper backend is faster-whisper or
-openai-whisper (``--skip-wer`` to omit); ``--accent-clf`` needs speechbrain;
-``--loudnorm`` needs pyloudnorm.
+openai-whisper (``--skip-wer`` to omit); ``--loudnorm`` needs pyloudnorm.
 
-Part of the X-VC accent fine-tuning pipeline. Upstream: https://github.com/Jerrister/X-VC (MIT).
+Upstream: https://github.com/Jerrister/X-VC (MIT).
 """
 
 from __future__ import annotations
@@ -226,50 +225,6 @@ class Whisper:
             segments, _ = self.model.transcribe(wav_path, language="en")
             return " ".join(s.text for s in segments)
         return self.model.transcribe(wav_path, language="en")["text"]
-
-
-class AccentClassifier:
-    """Optional CommonAccent ECAPA classifier (speechbrain)."""
-
-    def __init__(self, device: str):
-        from speechbrain.inference.classifiers import EncoderClassifier
-        self.clf = EncoderClassifier.from_hparams(
-            source="Jzuluaga/accent-id-commonaccent_ecapa",
-            savedir="pretrained/accent-id-commonaccent_ecapa",
-            run_opts={"device": device},
-        )
-
-    def classify_detailed(self, wav_path: str):
-        """Return the winning label and the complete 16-class posterior."""
-        import torch
-
-        out_prob, score, index, label = self.clf.classify_file(wav_path)
-        # SpeechBrain documents ``out_prob`` as log posteriors, while older
-        # ECAPA model/interface combinations can expose unnormalised cosine
-        # scores. Softmax is correct for both representations and guarantees
-        # a real 16-way probability distribution.
-        scores = out_prob.detach().float().reshape(-1)
-        probabilities = torch.softmax(scores, dim=0)
-        if not torch.isfinite(probabilities).all():
-            raise RuntimeError("CommonAccent returned non-finite class scores")
-        if abs(float(probabilities.sum().item()) - 1.0) > 1e-5:
-            raise RuntimeError("CommonAccent posterior did not normalize to one")
-        encoder = self.clf.hparams.label_encoder
-        labels = list(encoder.decode_torch(torch.arange(probabilities.numel())))
-        posterior = {
-            str(name).casefold(): float(probabilities[position].item())
-            for position, name in enumerate(labels)
-        }
-        if "indian" not in posterior:
-            raise RuntimeError(
-                f"CommonAccent label encoder has no 'indian' class: {labels}"
-            )
-        winning = str(label[0]).casefold()
-        return winning, posterior[winning], posterior
-
-    def classify(self, wav_path: str):
-        label, confidence, _ = self.classify_detailed(wav_path)
-        return label, confidence
 
 
 class MOSPredictor:
@@ -516,16 +471,13 @@ def cmd_run(args) -> int:
             else:
                 wer_ref[s.stem] = (norm_text(whisper.transcribe(str(s))), "asr_source_proxy")
 
-    accent_clf = AccentClassifier("cuda" if torch.cuda.is_available() else "cpu") \
-        if args.accent_clf else None
     mos_model = MOSPredictor("cuda" if torch.cuda.is_available() else "cpu") \
         if args.mos else None
 
     rows = []
     fieldnames = ["step", "mode", "source", "target", "sim_cosine", "wer", "wer_mode",
                   "mos_pred", "dur_source_s", "dur_out_s", "dur_delta_pct",
-                  "accent_label", "accent_conf", "indian_prob", "lufs_in",
-                  "avg_latency_ms", "out_path"]
+                  "lufs_in", "avg_latency_ms", "out_path"]
 
     for ck in ckpts:
         step = ck["step"]
@@ -592,22 +544,12 @@ def cmd_run(args) -> int:
                     ref, wmode = wer_ref[src.stem]
                     wer = round(word_error_rate(ref, hyp), 4)
 
-                alabel = aconf = indian_prob = None
-                if accent_clf is not None:
-                    alabel, aconf, posterior = accent_clf.classify_detailed(
-                        str(out_path)
-                    )
-                    indian_prob = posterior["indian"]
-
                 rows.append({
                     "step": step, "mode": mode, "source": src.stem, "target": t.stem,
                     "sim_cosine": round(sim, 4), "wer": wer, "wer_mode": wmode,
                     "mos_pred": round(mos, 3) if mos is not None else None,
                     "dur_source_s": round(dur_src, 3), "dur_out_s": round(dur_out, 3),
                     "dur_delta_pct": round(100.0 * (dur_out - dur_src) / max(dur_src, 1e-6), 2),
-                    "accent_label": alabel,
-                    "accent_conf": round(aconf, 4) if aconf is not None else None,
-                    "indian_prob": round(indian_prob, 6) if indian_prob is not None else None,
                     "lufs_in": round(lufs_in, 2) if lufs_in is not None else None,
                     "avg_latency_ms": round(latency, 1) if latency is not None else None,
                     "out_path": str(out_path),
@@ -642,7 +584,6 @@ def cmd_run(args) -> int:
             "sim_cosine_mean": agg([r["sim_cosine"] for r in sub]),
             "wer_mean": agg([r["wer"] for r in sub]),
             "mos_pred_mean": agg([r["mos_pred"] for r in sub]),
-            "indian_prob_mean": agg([r["indian_prob"] for r in sub]),
             "abs_dur_delta_pct_mean": agg([abs(r["dur_delta_pct"]) for r in sub]),
             "avg_latency_ms": agg([r["avg_latency_ms"] for r in sub]),
         })
@@ -689,8 +630,8 @@ def main(argv=None) -> int:
                    help="pinned target reference wavs (<speaker>.wav), see make-targets")
     r.add_argument(
         "--evaluation-plan",
-        help="JSON plan that enforces native source speakers, target accent group, "
-             "and one assigned target per source; without it, legacy Cartesian "
+        help="JSON plan that enforces unseen source speakers and one assigned "
+             "persona target per source; without it, legacy Cartesian "
              "source x target evaluation is used",
     )
     r.add_argument("--config", default=None, help="default: <run-dir>/config.yaml")
@@ -701,8 +642,6 @@ def main(argv=None) -> int:
     r.add_argument("--transcripts", default=None, help="TSV name<TAB>text for WER reference")
     r.add_argument("--wer-model", default="small", help="whisper model size (default small)")
     r.add_argument("--skip-wer", action="store_true")
-    r.add_argument("--accent-clf", action="store_true",
-                   help="CommonAccent ECAPA accent-ID confidence (needs speechbrain)")
     r.add_argument("--mos", action="store_true",
                    help="predicted MOS per conversion (UTMOS22-strong via torch.hub; "
                         "measures the robotic/artifact axis that cosine and WER miss)")

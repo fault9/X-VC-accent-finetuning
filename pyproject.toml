@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xvc-accent-finetuning"
+name = "xvc-target-voice-naturalness"
 version = "0.1.0"
-description = "X-VC target-persona research tools for joint voice and accent conversion"
+description = "Persona-specific X-VC naturalness adaptation tools"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

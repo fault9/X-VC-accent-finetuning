@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hard preflight checks for native-to-accent X-VC cross-pair datasets.
+"""Hard preflight checks for X-VC adaptation datasets.
 
 Compatibility wrapper: the checks live in ``xvc.data.validation`` (same
 thresholds, same report fields, same exit codes). One behavioral fix over the

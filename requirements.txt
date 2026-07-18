@@ -27,10 +27,8 @@ torchaudio==2.5.1
 tensorboard==2.20.0
 descript_audiotools==0.7.2
 
-# Maintained evaluation stack (MOS/WER/accent/speaker checks).
+# Maintained naturalness evaluation stack (MOS/WER/speaker checks).
 faster-whisper
-speechbrain
-pyloudnorm
 huggingface-hub==0.36.2
 
 # pip version is 24.0

@@ -154,40 +154,32 @@ Minimal example:
 {"source_utt":"utt_0001","source_wav_path":"<path_to_source>","target_utt":"utt_0002","target_wav_path":"<path_to_target>"}
 ```
 
-## Hindi target-persona research pipeline
+## Persona-specific naturalness adaptation
 
-This fork keeps the original X-VC layout and adds one focused research path:
-make arbitrary English source speakers sound like the ASI target persona (ASI
-voice plus Hindi/Indian-English pronunciation) while the released X-VC model
-remains frozen.
+This workspace keeps the original X-VC runtime and adds one focused experiment:
+improve conversion naturalness for four fixed VCTK persona references without
+performing accent conversion.
 
-The maintained workflow is:
+Each persona gets an independent low-rank adapter trained only on other pristine
+recordings from that target speaker. The stock source encoders, quantizer,
+speaker encoder, prenet, and decoder remain frozen. Checkpoints are screened on
+prompt-held-out recordings from unseen source speakers using HMO streaming
+settings, UTMOS, WER, target-speaker similarity, and blinded listening.
 
-1. build and validate pristine prompt-matched native/ASI recordings;
-2. use MFA phone tiers as alignment metadata only (never warp training audio);
-3. localize accent information with a semantic/acoustic stream-swap audit;
-4. train a small causal joint semantic/acoustic mapper; and
-5. evaluate on unseen source speakers against matched stock-X-VC controls.
+Start with:
 
-Start with the fresh-container and asset checklist in
-[`docs/environment.md`](docs/environment.md). The maintained experiment and
-data contracts are documented in:
-
+- [`docs/environment.md`](docs/environment.md)
 - [`docs/datasets.md`](docs/datasets.md)
-- [`docs/mfa_phone_alignment.md`](docs/mfa_phone_alignment.md)
-- [`docs/xvc_accent_stream_audit.md`](docs/xvc_accent_stream_audit.md)
-- [`docs/joint_persona_mapper.md`](docs/joint_persona_mapper.md)
+- [`docs/vctk_persona_naturalness.md`](docs/vctk_persona_naturalness.md)
 
-The registered discrete-code experiment is launched with:
+The registered queue is:
 
 ```bash
-bash scripts/run_joint_persona_discrete_sweep.sh
+bash scripts/run_vctk_persona_naturalness_sweep.sh
 ```
 
-Historical sweep YAMLs and one-off DTW, LoRA, distillation, and teacher-scale
-runners are intentionally not retained on this branch. Experiment outputs,
-datasets, checkpoints, transfer archives, and local research notes remain
-outside git.
+Accent, MFA, pronunciation-editor, DTW, and teacher-distillation experiments
+are intentionally excluded from this workspace.
 
 ## Acknowledgements
 

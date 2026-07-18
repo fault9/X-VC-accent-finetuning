@@ -110,7 +110,7 @@ def main():
     params_statistic(models)
 
     # Hard gate: the freeze must have produced exactly the requested trainable set
-    # (prenet + acoustic_converter for the accent fine-tune). Fails loudly at
+    # (for example, the selected target-conditioning adapter hosts). Fails loudly at
     # startup if a module was left unfrozen or a whitelist entry was misspelled.
     verify_trainable_modules(models, config)
 

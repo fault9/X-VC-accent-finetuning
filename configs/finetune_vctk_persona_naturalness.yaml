@@ -1,0 +1,73 @@
+# Naturalness-only adaptation template for one fixed VCTK persona reference.
+#
+# The dataset is target-only self-reconstruction from OTHER pristine utterances
+# by that persona's speaker. It contains no cross-speaker pairs, accent objective,
+# MFA/DTW alignment, warped waveform, or generated teacher audio.
+#
+# This file is the conservative default.  The sweep runner generates its small
+# rank/LR/capacity controls under exp/vctk_persona_naturalness_sweep/configs/ so configs/
+# does not accumulate one YAML per arm.
+
+base_config: configs/xvc.yaml
+
+# All four stimuli are at least 9.159 s. A common first 9.0 s condition prevents
+# target-length from changing between personas and matches training/evaluation.
+# If HMO later separates
+# the full speaker embedding from a shorter frame condition, training/eval must
+# be changed together rather than silently introducing a mismatch.
+reference_duration: 9.0
+
+datasets:
+  train:
+    - data/vctk_naturalness_4voice/manifests/by_persona/female_high_p240_10s/train.jsonl
+  val:
+    - data/vctk_naturalness_4voice/manifests/by_persona/female_high_p240_10s/val.jsonl
+
+dataloader:
+  reconstruction_ratio: 1.0
+  reversed_ratio: 0.0
+  mask_target_condition: true
+  static:
+    batch_size: 4
+
+current_step: 0
+current_epoch: 0
+log_interval: 10
+val_interval: 50
+save_interval: 50
+keep_interval: 50
+total_step: 300
+
+# The released xvc.pt has no trained discriminator.  Starting a GAN from random
+# weights on a small single-persona corpus is an artifact risk, not a MOS repair.
+generator_warmup_steps: 100000
+ema_update: false
+run_validation: true
+freeze_eval_backbone: true
+
+model:
+  generator:
+    trainable_modules: [acoustic_converter]
+    lora:
+      enabled: true
+      r: 2
+      alpha: 16
+      dropout: 0.0
+      target_modules: [acoustic_converter]
+      # Target-conditioning side only: reference-mel projection/context stream
+      # plus global speaker AdaLN.  Source x-stream projections stay frozen so
+      # the adapter cannot specialize to the training speakers as input sources.
+      include:
+        - "input_embed.linear_cond"
+        - "attn.to_q_c"
+        - "attn.to_k_c"
+        - "attn.to_v_c"
+        - "attn.to_out_c"
+        - "ff_c.ff"
+        - "attn_norm_x.linear"
+        - "norm_out.linear"
+    optim_conf:
+      lr: 0.00005
+
+  discriminator:
+    no_grad: true
