@@ -65,7 +65,8 @@ nohup bash scripts/run_vctk_persona_naturalness_sweep.sh \
 ```
 
 The smoke command runs one persona, one arm, two steps, and two evaluation
-sources. Run the full command only after it completes successfully.
+sources. It writes to `exp/vctk_persona_naturalness_smoke`, separate from the
+resumable full queue. Run the full command only after it completes successfully.
 
 The default full command queues all four personas (five arms each). To run or
 resume just one persona, set for example:

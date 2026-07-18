@@ -55,5 +55,5 @@ SMOKE=1 bash scripts/run_vctk_persona_naturalness_sweep.sh
 ```
 
 The smoke runs one persona, one LoRA arm, two training steps, and two evaluation
-sources. After it succeeds, launch the registered queue documented in
+sources in a dedicated smoke output directory. After it succeeds, launch the registered queue documented in
 [`vctk_persona_naturalness.md`](vctk_persona_naturalness.md).

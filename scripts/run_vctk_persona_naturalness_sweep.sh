@@ -25,6 +25,11 @@ max_sources="${MAX_SOURCES:-0}"
 run_offline="${RUN_OFFLINE:-0}"
 smoke="${SMOKE:-0}"
 full_eval="${FULL_EVAL:-0}"
+if [[ "$smoke" == "1" && -z "${EXP_ROOT:-}" ]]; then
+  # Never let two-step smoke artifacts make the resumable full queue believe
+  # an arm's training/evaluation is already complete.
+  exp_root="exp/vctk_persona_naturalness_smoke"
+fi
 if [[ "$full_eval" == "1" ]]; then
   source_dir="$data_root/eval_sources"
 else
