@@ -24,7 +24,11 @@ logger_initialized = False
 tensorboard_writer = None
 
 logging.basicConfig(level=logging.INFO)
+debug = logging.debug
 info = logging.info
+warning = logging.warning
+warn = warning
+error = logging.error
 
 
 def init(
@@ -46,7 +50,7 @@ def init(
 
     This function sets up a file-based logger and, if specified, a TensorBoard SummaryWriter.
     """
-    global logger_initialized, tensorboard_writer, logger, debug, info, warn, error
+    global logger_initialized, tensorboard_writer, logger, debug, info, warning, warn, error
 
     basename = os.path.basename(log_directory)
 
@@ -72,12 +76,15 @@ def init(
         logger.addHandler(stream_handler)
 
         # Assign simplified access to logging functions.
-        debug, info, warn, error = (
+        debug, info, warning, error = (
             logger.debug,
             logger.info,
             logger.warning,
             logger.error,
         )
+        # Keep the legacy alias used by older X-VC modules while also exposing
+        # the standard logging API expected by checkpoint/trainer code.
+        warn = warning
 
         # Prevent re-initialization.
         logger_initialized = True
