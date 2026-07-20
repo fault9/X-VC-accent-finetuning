@@ -350,6 +350,14 @@ def wrap_cuda_model(args, models):
         if args.train_engine == "torch_ddp":  # native pytorch ddp
             assert torch.cuda.is_available()
             model.cuda()
+            # A frozen auxiliary model still has to live on the GPU when the
+            # trainer references it, but PyTorch refuses to construct DDP for
+            # a module with no trainable parameters.  Naturalness-only LoRA
+            # keeps the discriminator fully frozen, so leave such modules
+            # unwrapped instead of failing during startup.
+            if not any(parameter.requires_grad for parameter in model.parameters()):
+                log.info("model '%s' is fully frozen; moved to CUDA without DDP", k)
+                continue
             model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
             model = DDP(model)
             if args.fp16_grad_sync:
